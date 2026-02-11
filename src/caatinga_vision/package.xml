@@ -4,7 +4,7 @@
   <name>caatinga_vision</name>
   <version>0.1.0</version>
   <description>Computer vision pipeline for smart Agro Robot traceability</description>
-  <maintainer email="joao@example.com">joaodemoura</maintainer>
+  <maintainer email="joaodemouragy@gmail.com">joaodemouragy-hash</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>

@@ -16,9 +16,9 @@ setup(
     ],
     install_requires=["setuptools"],
     zip_safe=True,
-    maintainer="joaodemoura",
-    maintainer_email="joao@example.com",
-    description="Pipeline de visao computacional para rastreabilidade inteligente",
+    maintainer="joaodemouragy-hash",
+    maintainer_email="joaodemouragy@gmail.com",
+    description="Computer vision pipeline for smart Agro Robot traceability",
     license="Apache-2.0",
     tests_require=["pytest"],
     entry_points={
