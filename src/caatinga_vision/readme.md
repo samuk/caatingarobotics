@@ -6,6 +6,29 @@ A ROS 2 computer vision pipeline developed for smart agricultural robotics, spec
 
 The `caatinga_vision` package serves as the primary visual perception layer for the Caatinga Robotics platform. It processes raw camera feeds to detect and track objects—ranging from agricultural equipment to people and livestock—facilitating autonomous navigation and crop traceability.
 
+### What the Robot "Sees"
+
+The system is currently configured with the COCO Dataset, enabling it to recognise 80 common object classes out of the box. For an agricultural robot, this provides immediate functional capabilities:
+- Safety & Obstacle Avoidance: Real-time detection of person, dog, and truck ensures the robot can stop or navigate around farmworkers and domestic animals.
+- Livestock Traceability: Built-in support for cow, sheep, and horse allows for automated headcounts and fence-line monitoring.
+- Operational Awareness: Identification of backpacks, bottles, or tools helps in maintaining a clean and safe working environment in the field.
+
+### Why YOLO for Agriculture?
+- Traceability: By converting video pixels into structured data (Detection2DArray), the robot logs the "Who, What, and Where" of every encounter. This creates a digital audit trail essential for modern smart farming.
+- Edge Efficiency: Unlike standard AI that requires powerful cloud servers, YOLOv4-tiny is optimised for "The Edge." It runs directly on the robot's onboard computer, ensuring 24/7 operation even in remote fields with no internet connection.
+- Low Latency: The "You Only Look Once" approach processes the entire frame in a single mathematical pass. This allows the robot to react to a moving obstacle (like a worker stepping into its path) in milliseconds.
+
+### Future Scalability: Transfer Learning
+
+The caatinga_vision package is designed as a base layer. By replacing the coco.names and .weights files, the pipeline can be "re-trained" to detect specific agricultural interests such as:
+
+    Identifying weeds vs. crops for precision spraying.
+
+    Detecting fruit ripeness levels for automated harvesting.
+
+    Monitoring plant stress or disease markers.
+
+
 ### **Key Features**
 
 * **ROS 2 Integration:** Fully compatible with ROS 2 (Humble/Foxy) using `rclpy`.  
