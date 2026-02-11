@@ -1,0 +1,83 @@
+name: repo-hygiene
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate README links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --no-progress --verbose README.md
+          fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate Python syntax
+        shell: bash
+        run: |
+          python3 -m compileall src
+
+      - name: Block prohibited and oversized files in new commits
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          event_name="${{ github.event_name }}"
+          if [ "${event_name}" = "pull_request" ]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+            head_sha="${{ github.event.pull_request.head.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+            head_sha="${{ github.sha }}"
+          fi
+
+          if [ -z "${base_sha}" ] || [ "${base_sha}" = "0000000000000000000000000000000000000000" ]; then
+            base_sha="$(git rev-list --max-parents=0 "${head_sha}" | tail -n 1)"
+          fi
+
+          echo "Inspecting commit range: ${base_sha}..${head_sha}"
+          changed_files="$(git diff --name-only --diff-filter=AM "${base_sha}..${head_sha}")"
+
+          if [ -z "${changed_files}" ]; then
+            echo "No added/modified files in range."
+            exit 0
+          fi
+
+          prohibited_pattern='\.(pt|rar)$'
+          max_size_bytes=$((25 * 1024 * 1024))
+          failed=0
+
+          while IFS= read -r file_path; do
+            [ -z "${file_path}" ] && continue
+
+            if printf '%s\n' "${file_path}" | grep -Eiq "${prohibited_pattern}"; then
+              echo "ERROR: prohibited artifact extension detected: ${file_path}"
+              failed=1
+            fi
+
+            if [ -f "${file_path}" ]; then
+              file_size="$(wc -c < "${file_path}")"
+              if [ "${file_size}" -gt "${max_size_bytes}" ]; then
+                echo "ERROR: oversized file detected (${file_size} bytes): ${file_path}"
+                failed=1
+              fi
+            fi
+          done <<< "${changed_files}"
+
+          if [ "${failed}" -ne 0 ]; then
+            echo "Repository hygiene checks failed."
+            exit 1
+          fi
+
+          echo "Repository hygiene checks passed."
