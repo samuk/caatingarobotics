@@ -14,7 +14,7 @@ The `caatinga_vision` package serves as the primary visual perception layer for 
 * **Agro-Focused:** Specifically tuned for the requirements of smart agricultural traceability.
 
 ## **Package Structure**
-
+```
 caatinga_vision/
 ├── config/             # Parameter files (.yaml) and class labels (.names)
 ├── launch/             # ROS 2 launch scripts
@@ -25,6 +25,7 @@ caatinga_vision/
 │   └── tools.py                 # Image processing utilities
 ├── package.xml         # Package metadata and dependencies
 └── setup.py            # Build and installation script
+```
 
 ## **Prerequisites**
 
