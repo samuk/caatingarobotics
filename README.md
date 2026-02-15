@@ -1,3 +1,5 @@
+Experimental Jazzy build . Untested!
+
 # caatingarobotics
 
 ROS 2 workspace for precision agriculture robotics, combining simulation, navigation,
