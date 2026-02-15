@@ -64,8 +64,8 @@ High-level data flow:
 
 ### 1. Prerequisites
 
-- Ubuntu 22.04
-- ROS 2 Humble
+- Ubuntu Noble
+- ROS 2 jazzy
 - `colcon`
 - `rosdep`
 
