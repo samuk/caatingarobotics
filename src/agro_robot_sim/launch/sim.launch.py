@@ -1,4 +1,5 @@
 import os
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -10,54 +11,60 @@ import xacro
 
 def generate_launch_description():
     pkg_agro = get_package_share_directory('agro_robot_sim')
-    pkg_ros_gz = get_package_share_directory('ros_gz_sim')
+    pkg_gazebo_ros = get_package_share_directory('gazebo_ros')
 
+    # 1. Argumento do Mundo
+    # O default é vazio. Se vazio, o Gazebo abre o mundo padrão.
     world_arg = DeclareLaunchArgument(
         'world',
-        default_value=os.path.join(pkg_agro, 'worlds', 'minha_fazenda.world'),
-        description='Full path to world file',
+        default_value='',
+        description='Caminho completo para o arquivo world'
     )
 
-    gz_sim = IncludeLaunchDescription(
+    # 2. Configurar o Gazebo Server
+    # Aqui passamos o argumento 'world' explicitamente
+    gzserver = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(pkg_ros_gz, 'launch', 'gz_sim.launch.py')
+            os.path.join(pkg_gazebo_ros, 'launch', 'gzserver.launch.py')
         ),
-        launch_arguments={'gz_args': LaunchConfiguration('world')}.items(),
+        launch_arguments={'world': LaunchConfiguration('world')}.items()
     )
 
+    # 3. Configurar o Gazebo Client (Interface)
+    gzclient = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg_gazebo_ros, 'launch', 'gzclient.launch.py')
+        )
+    )
+
+    # 4. Processar o Robô (URDF/Xacro)
     xacro_file = os.path.join(pkg_agro, 'urdf', 'robo_caatinga.urdf.xacro')
     robot_desc = xacro.process_file(xacro_file).toxml()
 
+    # 5. Publicar Estado do Robô (TF)
     robot_state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
+        name='robot_state_publisher',
         output='screen',
-        parameters=[{'use_sim_time': True, 'robot_description': robot_desc}],
+        parameters=[{'use_sim_time': True, 'robot_description': robot_desc}]
     )
 
+    # 6. Spawnar o Robô no Gazebo
     spawn_robot = Node(
-        package='ros_gz_sim',
-        executable='create',
+        package='gazebo_ros',
+        executable='spawn_entity.py',
         arguments=[
-            '-name', 'agro_robot',
-            '-topic', 'robot_description',
-            '-x', '0', '-y', '0', '-z', '0.3',
+            '-topic', 'robot_description', '-entity', 'agro_robot',
+            '-x', '0', '-y', '0', '-z', '0.1',
         ],
-        output='screen',
+        output='screen'
     )
 
-    gz_bridge = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        arguments=[
-            '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-            '/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
-            '/gps/fix@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat',
-            '/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
-            '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
-            '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
-        ],
-        output='screen',
-    )
-
-    return LaunchDescription([world_arg, gz_sim, robot_state_publisher, spawn_robot, gz_bridge])
+    return LaunchDescription([
+        world_arg,
+        gzserver,
+        gzclient,
+        robot_state_publisher,
+        spawn_robot
+    ])

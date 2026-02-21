@@ -1,18 +1,20 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/xml-model"?>
 <package format="3">
-  <name>agro_robot_sim</name>
+  <name>caatinga_nav</name>
   <version>0.1.0</version>
-  <description>Simulation package for the Caatinga robot on ROS 2 Humble</description>
+  <description>Standalone navigation package for the Caatinga robot</description>
   <maintainer email="joaodemouragy@gmail.com">joaodemouragy-hash</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>rclpy</depend>
+  <depend>nav2_bringup</depend>
+  <depend>slam_toolbox</depend>
   <depend>robot_state_publisher</depend>
   <depend>xacro</depend>
-  <depend>gazebo_ros</depend>
-  <depend>joint_state_publisher</depend>
+  <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
 
