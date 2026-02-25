@@ -41,7 +41,7 @@
 #              in Arable Fields", arXiv:2109.11936, 2021.
 #              Ahmadi et al., ICRA 2020.
 #
-# Adapted for caatinga_vision / Sowbot by Agroecology Lab CIC / Sowbot CIC.
+# Adapted for caatinga_vision / Sowbot by Agroecology Lab Ltd
 #
 # Launches crop_row_node with its own dedicated camera (standalone, no shared camera).
 # The crop_row_node opens the camera directly via OpenCV VideoCapture.
@@ -73,7 +73,7 @@ def generate_launch_description():
     # Base params from file — hardware-specific values live here, not in this launch file.
     # Edit caatinga_vision/config/crop_row_params.yaml to set camera_height_m, camera_tilt_deg etc.
     params_file = PathJoinSubstitution(
-        [FindPackageShare("caatinga_vision"), "config", "crop_row_params.yaml"]
+        [FindPackageShare("sowbot_row_follow"), "config", "crop_row_params.yaml"]
     )
 
     return LaunchDescription([
@@ -85,7 +85,7 @@ def generate_launch_description():
                               description="true=/cmd_vel (testing) | false=AOC conditions (production)"),
 
         Node(
-            package="caatinga_vision",
+            package="sowbot_row_follow",
             executable="crop_row_node",
             name="crop_row_node",
             output="screen",
