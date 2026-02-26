@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/xml-model"?>
 <package format="3">
-  <n>agro_robot_sim</n>
+  <name>agro_robot_sim</name>
   <version>0.2.0</version>
   <description>Simulation package for the Caatinga agro-robot — ROS 2 Jazzy + Gazebo Harmonic</description>
   <maintainer email="joaodemouragy@gmail.com">joaodemouragy-hash</maintainer>
