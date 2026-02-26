@@ -1,14 +1,26 @@
 <?xml version="1.0"?>
+<!--
+  robo_caatinga.urdf.xacro  —  Gazebo Harmonic port
+  Plugins migrated from gazebo_ros_pkgs (Classic) to native gz-sim systems.
+  All sensor data is bridged to ROS via ros_gz_bridge in sim.launch.py.
+
+  Plugin mapping:
+    libgazebo_ros_joint_state_publisher  ->  gz-sim-joint-state-publisher-system  (world plugin)
+    libgazebo_ros_diff_drive             ->  gz-sim-diff-drive-system
+    libgazebo_ros_ray_sensor             ->  sensor type="gpu_lidar"  (world sensors plugin)
+    libgazebo_ros_gps_sensor             ->  sensor type="navsat"     (world sensors plugin)
+    libgazebo_ros_imu_sensor             ->  sensor type="imu"        (world sensors plugin)
+-->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="agro_robot">
 
   <xacro:property name="wheel_radius" value="0.215"/>
-  <xacro:property name="wheel_width"  value="0.22"/>  
+  <xacro:property name="wheel_width"  value="0.22"/>
   <xacro:property name="track_width"  value="1.85"/>
   <xacro:property name="wheelbase"    value="1.10"/>
-  
+
   <xacro:property name="chassis_len"  value="1.52"/>
   <xacro:property name="chassis_wid"  value="1.74"/>
-  <xacro:property name="chassis_h"    value="0.49"/> 
+  <xacro:property name="chassis_h"    value="0.49"/>
   <xacro:property name="ground_clearance" value="0.16"/>
 
   <xacro:property name="rail_height" value="0.33"/>
@@ -198,7 +210,7 @@
     <child link="solar_panel"/>
     <origin xyz="0 0 ${rail_height + solar_elevation}" rpy="0 0 0"/>
   </joint>
-  
+
   <xacro:macro name="wheel" params="prefix x y">
     <link name="${prefix}_wheel">
       <visual>
@@ -209,7 +221,7 @@
       <collision>
         <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
         <geometry> <cylinder radius="${wheel_radius}" length="${wheel_width}"/> </geometry>
-         <surface>
+        <surface>
           <friction>
             <ode>
               <mu>1.5</mu>
@@ -240,6 +252,12 @@
   <xacro:wheel prefix="back_left"   x="-${wheelbase/2}" y="${track_width/2}"/>
   <xacro:wheel prefix="back_right"  x="-${wheelbase/2}" y="-${track_width/2}"/>
 
+  <!-- ════════════════════════════════════════════════════════════════════════
+       LIDAR LINK
+       Classic: libgazebo_ros_ray_sensor  (sensor type="ray")
+       Harmonic: sensor type="gpu_lidar"  driven by world-level sensors plugin
+                 topic "scan" bridged to /scan by ros_gz_bridge
+       ════════════════════════════════════════════════════════════════════════ -->
   <link name="lidar_link">
     <visual>
       <geometry> <cylinder radius="0.05" length="0.05"/> </geometry>
@@ -253,6 +271,36 @@
     <origin xyz="${solar_len/2 - 0.1} 0 -0.05" rpy="0 0 0"/>
   </joint>
 
+  <gazebo reference="lidar_link">
+    <!-- gpu_lidar replaces ray; sensors system loaded at world level -->
+    <sensor name="lidar" type="gpu_lidar">
+      <pose>0 0 0 0 0 0</pose>
+      <topic>scan</topic>
+      <gz_frame_id>lidar_link</gz_frame_id>
+      <update_rate>10</update_rate>
+      <visualize>false</visualize>
+      <lidar>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.4</min>
+          <max>20.0</max>
+        </range>
+      </lidar>
+    </sensor>
+  </gazebo>
+
+  <!-- ════════════════════════════════════════════════════════════════════════
+       GPS LINK
+       Classic: libgazebo_ros_gps_sensor  (sensor type="gps")
+       Harmonic: sensor type="navsat"  driven by world-level sensors plugin
+                 topic "gps" bridged to /gps/fix by ros_gz_bridge
+       ════════════════════════════════════════════════════════════════════════ -->
   <link name="gps_link">
     <visual>
       <geometry> <box size="0.05 0.05 0.05"/> </geometry>
@@ -270,76 +318,21 @@
     <origin xyz="0 0 0.5" rpy="0 0 0"/>
   </joint>
 
-  <gazebo>
-    <plugin name="agro_joint_state" filename="libgazebo_ros_joint_state_publisher.so">
-      <ros> <remapping>~/out:=joint_states</remapping> </ros>
-      <update_rate>30</update_rate>
-      <joint_name>front_left_wheel_joint</joint_name>
-      <joint_name>front_right_wheel_joint</joint_name>
-      <joint_name>back_left_wheel_joint</joint_name>
-      <joint_name>back_right_wheel_joint</joint_name>
-    </plugin>
-  </gazebo>
-
-  <gazebo>
-    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
-      <ros> <remapping>cmd_vel:=cmd_vel</remapping> </ros>
-      
-      <update_rate>50</update_rate>
-
-      <num_wheel_pairs>2</num_wheel_pairs>
-      
-      <left_joint>front_left_wheel_joint</left_joint>
-      <left_joint>back_left_wheel_joint</left_joint>
-      <right_joint>front_right_wheel_joint</right_joint>
-      <right_joint>back_right_wheel_joint</right_joint>
-
-      <wheel_separation>${track_width}</wheel_separation>
-      <wheel_diameter>${wheel_radius * 2}</wheel_diameter>
-      
-      <max_wheel_torque>2000</max_wheel_torque> 
-      <max_wheel_acceleration>2.0</max_wheel_acceleration> 
-      <publish_odom>true</publish_odom>
-      <publish_odom_tf>true</publish_odom_tf>
-      <publish_wheel_tf>true</publish_wheel_tf>
-      
-      <odometry_frame>odom</odometry_frame>
-      <robot_base_frame>base_footprint</robot_base_frame>
-    </plugin>
-  </gazebo>
-  
-  <gazebo reference="lidar_link">
-    <sensor name="lidar" type="ray">
-      <pose>0 0 0 0 0 0</pose>
-      <visualize>false</visualize> <update_rate>10</update_rate>
-      <ray>
-        <scan>
-          <horizontal>
-            <samples>360</samples> <min_angle>-3.14</min_angle> <max_angle>3.14</max_angle>
-          </horizontal>
-        </scan>
-        <range> <min>0.4</min> <max>20.0</max> </range> </ray>
-      <plugin name="lidar_controller" filename="libgazebo_ros_ray_sensor.so">
-        <ros> <remapping>~/out:=/scan</remapping> </ros>
-        <output_type>sensor_msgs/LaserScan</output_type>
-        <frame_name>lidar_link</frame_name>
-      </plugin>
-    </sensor>
-  </gazebo>
-
   <gazebo reference="gps_link">
-    <sensor name="gps_sensor" type="gps">
+    <sensor name="gps_sensor" type="navsat">
       <always_on>true</always_on>
       <update_rate>10.0</update_rate>
-      <plugin name="gps_controller" filename="libgazebo_ros_gps_sensor.so">
-        <ros>
-          <remapping>~/out:=/gps/fix</remapping>
-        </ros>
-        <frame_name>gps_link</frame_name>
-      </plugin>
+      <topic>gps</topic>
+      <gz_frame_id>gps_link</gz_frame_id>
     </sensor>
   </gazebo>
 
+  <!-- ════════════════════════════════════════════════════════════════════════
+       IMU LINK
+       Classic: libgazebo_ros_imu_sensor
+       Harmonic: sensor type="imu"  driven by world-level sensors plugin
+                 topic "imu" bridged to /imu by ros_gz_bridge
+       ════════════════════════════════════════════════════════════════════════ -->
   <link name="imu_link">
     <visual>
       <geometry> <box size="0.02 0.02 0.02"/> </geometry>
@@ -357,14 +350,96 @@
     <sensor name="imu_sensor" type="imu">
       <always_on>true</always_on>
       <update_rate>100</update_rate>
-      <plugin name="imu_plugin" filename="libgazebo_ros_imu_sensor.so">
-        <ros>
-          <remapping>~/out:=/imu</remapping>
-        </ros>
-        <frame_name>imu_link</frame_name>
-        <initial_orientation_as_reference>false</initial_orientation_as_reference>
-      </plugin>
+      <topic>imu</topic>
+      <gz_frame_id>imu_link</gz_frame_id>
+      <imu>
+        <angular_velocity/>
+        <linear_acceleration/>
+      </imu>
     </sensor>
   </gazebo>
-  
+
+  <!-- ════════════════════════════════════════════════════════════════════════
+       DIFF DRIVE PLUGIN
+       Classic: libgazebo_ros_diff_drive  (inside <gazebo> with <ros> tag)
+       Harmonic: gz-sim-diff-drive-system  (no <ros> tag; topic bridged externally)
+
+       Note: max_wheel_acceleration (Classic) maps to max_linear_acceleration
+             = wheel_acceleration * wheel_radius = 2.0 * 0.215 = 0.43 m/s²
+       ════════════════════════════════════════════════════════════════════════ -->
+  <gazebo>
+    <plugin filename="gz-sim-diff-drive-system"
+            name="gz::sim::systems::DiffDrive">
+      <!-- 4-wheel skid-steer: two left joints, two right joints -->
+      <left_joint>front_left_wheel_joint</left_joint>
+      <left_joint>back_left_wheel_joint</left_joint>
+      <right_joint>front_right_wheel_joint</right_joint>
+      <right_joint>back_right_wheel_joint</right_joint>
+
+      <wheel_separation>${track_width}</wheel_separation>
+      <wheel_radius>${wheel_radius}</wheel_radius>
+
+      <max_linear_acceleration>0.43</max_linear_acceleration>
+      <max_angular_acceleration>1.0</max_angular_acceleration>
+
+      <!-- Topics (bridged to /cmd_vel and /odom by ros_gz_bridge) -->
+      <topic>cmd_vel</topic>
+      <odom_topic>odom</odom_topic>
+      <tf_topic>tf</tf_topic>
+
+      <odom_publish_frequency>50</odom_publish_frequency>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_footprint</child_frame_id>
+    </plugin>
+  </gazebo>
+
+  <!-- ════════════════════════════════════════════════════════════════════════
+       JOINT STATE PUBLISHER PLUGIN
+       Classic: libgazebo_ros_joint_state_publisher
+       Harmonic: gz-sim-joint-state-publisher-system
+                 topic "joint_states" bridged to /joint_states by ros_gz_bridge
+       ════════════════════════════════════════════════════════════════════════ -->
+  <gazebo>
+    <plugin filename="gz-sim-joint-state-publisher-system"
+            name="gz::sim::systems::JointStatePublisher">
+      <topic>joint_states</topic>
+      <joint_name>front_left_wheel_joint</joint_name>
+      <joint_name>front_right_wheel_joint</joint_name>
+      <joint_name>back_left_wheel_joint</joint_name>
+      <joint_name>back_right_wheel_joint</joint_name>
+    </plugin>
+  </gazebo>
+
+  <!-- ════════════════════════════════════════════════════════════════════════
+       WORLD-LEVEL SENSORS PLUGIN
+       Required by Harmonic to activate IMU, gpu_lidar, navsat sensors.
+       In Classic these sensors had individual ROS plugins; in Harmonic a single
+       world plugin handles all sensors and publishes to gz-transport topics,
+       which are then bridged to ROS by ros_gz_bridge.
+       ════════════════════════════════════════════════════════════════════════ -->
+  <gazebo>
+    <plugin filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+  </gazebo>
+
+  <!-- ════════════════════════════════════════════════════════════════════════
+       IMU SYSTEM PLUGIN
+       Required by Harmonic to process IMU sensor data.
+       ════════════════════════════════════════════════════════════════════════ -->
+  <gazebo>
+    <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu"/>
+  </gazebo>
+
+  <!-- ════════════════════════════════════════════════════════════════════════
+       NAVSAT SYSTEM PLUGIN
+       Required by Harmonic to process NavSat (GPS) sensor data.
+       ════════════════════════════════════════════════════════════════════════ -->
+  <gazebo>
+    <plugin filename="gz-sim-navsat-system"
+            name="gz::sim::systems::NavSat"/>
+  </gazebo>
+
 </robot>
