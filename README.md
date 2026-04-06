@@ -28,7 +28,7 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ros2 launch agro_robot_sim fazenda_completa.launch.py
 ```
-Test drive. (in a new terminal)
+Manual test drive. (in a new terminal)
 
 ```bash
 cd caatingarobotics_harmonic_port_test
