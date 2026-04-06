@@ -8,8 +8,8 @@ computer vision inference, and field traceability analytics.
 ## Clone and Build
 
 ```bash
-git clone https://github.com/THEREPO.git
-cd caatingarobotics_harmonic_port_test
+git clone https://github.com/ilovemicroplastics/caatingarobotics.git
+cd caatingarobotics
 ```
 Edit the clone repo link to be correct.
 
