@@ -9,12 +9,17 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <depend>robot_state_publisher</depend>
-  <depend>xacro</depend>
+
+
   <depend>gazebo_ros</depend>
   <depend>joint_state_publisher</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
