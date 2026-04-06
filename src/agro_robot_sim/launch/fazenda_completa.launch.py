@@ -23,7 +23,7 @@ def generate_launch_description():
     )
     world_arg = DeclareLaunchArgument(
         'world',
-        default_value='minha_fazenda.world',
+        default_value='minha_fazenda.sdf',
         description='Nome do arquivo do mundo Gazebo'
     )
 
