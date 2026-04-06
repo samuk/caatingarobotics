@@ -7,7 +7,7 @@ computer vision inference, and field traceability analytics.
 
 ## Clone and Build
 
-`` bash
+```bash
 git clone THEREPO.git
 cd caatingarobotics_harmonic_port_test
 ```
