@@ -8,10 +8,10 @@ computer vision inference, and field traceability analytics.
 ## Clone and Build
 
 ```bash
-git clone THEREPO.git
+git clone https://github.com/THEREPO.git
 cd caatingarobotics_harmonic_port_test
 ```
-Edit the clone to be correct
+Edit the clone repo link to be correct.
 
 ```bash
 source /opt/ros/jazzy/setup.bash
