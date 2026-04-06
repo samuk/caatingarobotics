@@ -1,7 +1,41 @@
 # caatingarobotics
 
+experimental fork for jazzy/ gazebo harmonic
+
 ROS 2 workspace for precision agriculture robotics, combining simulation, navigation,
 computer vision inference, and field traceability analytics.
+
+## Clone and Build
+
+```bash
+git clone https://github.com/ilovemicroplastics/caatingarobotics.git
+cd caatingarobotics
+```
+Edit the clone repo link to be correct.
+
+```bash
+source /opt/ros/jazzy/setup.bash
+rosdep update
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --symlink-install
+source install/setup.bash
+```
+
+To run when already built.
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 launch agro_robot_sim fazenda_completa.launch.py
+```
+Manual test drive. (in a new terminal)
+
+```bash
+cd caatingarobotics_harmonic_port_test
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args --remap cmd_vel:=/cmd_vel
+```
 
 ## Project Pitch
 
@@ -30,8 +64,8 @@ High-level data flow:
 
 ## Tech Stack
 
-- ROS 2 Humble
-- Gazebo + Nav2 + SLAM Toolbox
+- ROS 2 jazzy
+- Gazebo harmonic + Nav2 + SLAM Toolbox
 - YOLO (Ultralytics), OpenCV, `cv_bridge`
 - Python (`rclpy`) and CMake (`ament_cmake`)
 - PyQt5 operational panel tooling
@@ -62,8 +96,8 @@ High-level data flow:
 
 ### 1. Prerequisites
 
-- Ubuntu 22.04
-- ROS 2 Humble
+- Ubuntu Noble
+- ROS 2 jazzy
 - `colcon`
 - `rosdep`
 
