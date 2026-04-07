@@ -1,6 +1,6 @@
 # **Agro Robot Sim**
 
-A ROS 2 Humble simulation package designed for the **Caatinga** agricultural robot. This module provides a complete Gazebo-based simulation environment, allowing for the testing of autonomous navigation and sensor integration in a risk-free virtual field.
+A ROS 2 Jazzy simulation package designed for the **Caatinga** agricultural robot. This module provides a complete Gazebo-based simulation environment, allowing for the testing of autonomous navigation and sensor integration in a risk-free virtual field.
 
 ## **Overview**
 
@@ -21,7 +21,7 @@ The module is organized into the following key directories:
 
 | Feature | Specification |
 | :---- | :---- |
-| **ROS Distribution** | ROS 2 Humble Hawksbill |
+| **ROS Distribution** | ROS 2 Jazzy|
 | **Build System** | `ament_cmake` |
 | **Simulation Engine** | Gazebo |
 | **Transform Tree** | Managed via `robot_state_publisher` |

@@ -1,3 +1,5 @@
+Experimental Jazzy build . Untested!
+
 # caatingarobotics
 
 experimental fork for jazzy/ gazebo harmonic
