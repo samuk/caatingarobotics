@@ -27,10 +27,7 @@
       <render_engine>ogre2</render_engine>
     </plugin>
 
-    <!-- gz-sim-rendering-system -->
-    <plugin filename="gz-sim-rendering-system"
-            name="gz::sim::systems::Rendering"/>
-
+   
     <!-- gz-sim-scene-broadcaster-system -->
     <plugin filename="gz-sim-scene-broadcaster-system"
             name="gz::sim::systems::SceneBroadcaster"/>
