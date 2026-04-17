@@ -1,0 +1,36 @@
+### fusion_config.yaml for https://github.com/manankharwar/fusioncore
+## Maintainer: Agroecology Lab sowbot.co.uk
+
+fusion_node:
+  ros__parameters:
+    frequency: 30.0
+    two_d_mode: true
+    publish_tf: true
+    
+    # Frames
+    base_link_frame: "base_link"
+    odom_frame: "odom"
+    world_frame: "map"
+
+    gnss:
+      enabled: true
+      # USE THE RAW DRIVER TOPIC DIRECTLY
+      topic: "/ublox_dgnss/navpvt" 
+      
+      # DUAL ANTENNA CONFIG
+      use_dual_antenna_heading: true
+      heading_topic: "/ublox_dgnss/navrelposned" # FusionCore handles the NavRELPOSNED msg type
+      
+      # IMPORTANT: Lever arm offset (Antenna Master to Antenna Rover)
+      # This is critical for the F9P moving base.
+      dual_antenna_offset: [0.8, 0.0, 0.0] # Distance between antennas in meters
+      
+      # Correction for the farm's location
+      # Find your declination at: https://www.ngdc.noaa.gov/geomag/calculators/magcalc.shtml
+      magnetic_declination: -0.41 # Example value for NE Brazil
+
+    imu:
+      enabled: true
+      topic: "/imu"
+      has_magnetometer: false # Highly recommended to keep false if dual-antenna is active
+      enable_bias_estimation: true
