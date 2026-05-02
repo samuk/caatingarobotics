@@ -68,7 +68,7 @@
 #   /aoc/heartbeat/neo_vision         (std_msgs/Bool)     True enquanto fileiras detectadas (M10)
 #   /caatinga_vision/row_nav/debug_image (sensor_msgs/Image)  frame anotado / annotated frame (Foxglove)
 #
-# Opcional / Optional (use_direct_cmd_vel: true):
+# Publica sempre / Always publishes (gated by /row_follow/enable service):
 #   /cmd_vel  (geometry_msgs/Twist)
 
 from __future__ import division, print_function
@@ -83,6 +83,7 @@ from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32
+from std_srvs.srv import SetBool
 
 
 # ===========================================================================
@@ -385,7 +386,7 @@ class CropRowNode(Node):
         self.declare_parameter("omega_scaler", 0.1)
         self.declare_parameter("max_omega", 0.4)
         self.declare_parameter("heartbeat_timeout_s", 2.0)
-        self.declare_parameter("use_direct_cmd_vel", False)
+        self.declare_parameter("use_direct_cmd_vel", True)  # kept for param-file compat; ignored — service is the gate
 
         p = self.get_parameter
         self.image_topic: str    = p("image_topic").value
@@ -399,7 +400,6 @@ class CropRowNode(Node):
         self.omega_scaler: float = p("omega_scaler").value
         self.max_omega: float    = p("max_omega").value
         self.hb_timeout: float   = p("heartbeat_timeout_s").value
-        self.use_direct: bool    = p("use_direct_cmd_vel").value
 
         # Modelo de câmera para a matriz de interação do servo visual
         # Camera model for the visual servoing interaction matrix
@@ -409,9 +409,9 @@ class CropRowNode(Node):
         )
 
         self.get_logger().info(
-            "crop_row_node iniciado | subscribing to %s | modo: %s"
-            % (self.image_topic,
-               "cmd_vel direto / direct cmd_vel" if self.use_direct else "condições AOC / AOC conditions")
+            "crop_row_node iniciado / started | subscribing to %s | "
+            "cmd_vel gated by /row_follow/enable service"
+            % self.image_topic
         )
 
         # -------------------------------------------------------------------
@@ -440,10 +440,13 @@ class CropRowNode(Node):
         self.pub_debug = self.create_publisher(
             Image, self.debug_topic, 10)
 
-        # Publicador de cmd_vel direto — apenas para testes em campo
-        # Direct cmd_vel publisher — field testing only
-        if self.use_direct:
-            self.pub_cmd_vel = self.create_publisher(Twist, "/cmd_vel", 10)
+        # cmd_vel publisher — always active; /row_follow/enable service is the gate
+        self.pub_cmd_vel = self.create_publisher(Twist, "/cmd_vel", 10)
+
+        # Enable/disable service — Limbic calls this to start/stop row following
+        self._enabled = False
+        self.srv_enable = self.create_service(
+            SetBool, "/row_follow/enable", self._on_enable_service)
 
         # -------------------------------------------------------------------
         # Timer de heartbeat (5 Hz) — M10
@@ -537,8 +540,8 @@ class CropRowNode(Node):
         hdg_msg.data = heading_error_rad
         self.pub_heading.publish(hdg_msg)
 
-        # Modo de teste: publica cmd_vel diretamente / Testing mode: publish cmd_vel directly
-        if self.use_direct:
+        # Publish cmd_vel only when enabled by Limbic via /row_follow/enable
+        if self._enabled:
             twist = Twist()
             twist.linear.x = self.linear_vel   # velocidade frontal / forward speed
             twist.angular.z = omega             # correção de rumo / heading correction
@@ -550,6 +553,24 @@ class CropRowNode(Node):
             % (len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega,
                len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega)
         )
+
+    # -----------------------------------------------------------------------
+    # Enable / disable service — called by sowbot_row_follow on Limbic
+    # -----------------------------------------------------------------------
+
+    def _on_enable_service(self, request: SetBool.Request,
+                           response: SetBool.Response) -> SetBool.Response:
+        self._enabled = request.data
+        if not self._enabled:
+            self._publish_zero_cmd_vel()
+        response.success = True
+        response.message = "enabled" if self._enabled else "disabled"
+        self.get_logger().info("row_follow/enable → %s" % response.message)
+        return response
+
+    def _publish_zero_cmd_vel(self) -> None:
+        """Publish one zero-velocity Twist to guarantee the robot stops."""
+        self.pub_cmd_vel.publish(Twist())
 
     # -----------------------------------------------------------------------
     # Heartbeat M10
