@@ -53,14 +53,12 @@
 #   /aoc/conditions/row_offset          Normalised lateral offset [-1,1]
 #   /aoc/conditions/row_heading_error   Heading error in radians
 #   /aoc/heartbeat/neo_vision           Perception heartbeat for M10
-#
-# Optional (use_direct_cmd_vel:=true):
-#   /cmd_vel                            Direct velocity output for field testing
+#   /cmd_vel                            Always published; gated by /row_follow/enable service
 #
 # Usage:
-#   ros2 launch caatinga_vision crop_row_nav.launch.py
-#   ros2 launch caatinga_vision crop_row_nav.launch.py use_direct_cmd_vel:=true camera_index:=2
-#   ros2 launch caatinga_vision crop_row_nav.launch.py camera_height_m:=0.8 linear_vel:=0.05
+#   ros2 launch sowbot_row_follow crop_row_nav.launch.py
+#   ros2 launch sowbot_row_follow crop_row_nav.launch.py camera_index:=2
+#   ros2 launch sowbot_row_follow crop_row_nav.launch.py camera_height_m:=0.8 linear_vel:=0.05
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -80,9 +78,7 @@ def generate_launch_description():
 
         # Command-line overrides — these take precedence over crop_row_params.yaml.
         # Useful for quick experiments without editing the YAML.
-        DeclareLaunchArgument("camera_index",       default_value="0"),
-        DeclareLaunchArgument("use_direct_cmd_vel", default_value="true",
-                              description="true=/cmd_vel (testing) | false=AOC conditions (production)"),
+        DeclareLaunchArgument("camera_index", default_value="0"),
 
         Node(
             package="sowbot_row_follow",
@@ -92,11 +88,8 @@ def generate_launch_description():
             parameters=[
                 # 1. Load all defaults from the hardware params file
                 params_file,
-                # 2. Allow launch-arg overrides for the two most commonly toggled values
-                {
-                    "camera_index":       LaunchConfiguration("camera_index"),
-                    "use_direct_cmd_vel": LaunchConfiguration("use_direct_cmd_vel"),
-                },
+                # 2. Allow launch-arg override for camera index
+                {"camera_index": LaunchConfiguration("camera_index")},
             ],
         ),
     ])
