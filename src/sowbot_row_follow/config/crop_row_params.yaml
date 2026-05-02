@@ -43,10 +43,10 @@ crop_row_node:
     max_omega: 0.4             # Hard angular velocity cap (rad/s).
 
     # -------------------------------------------------------------------------
-    # Output mode
-    # Start with true. Verify in Foxglove. Switch to false for AOC production.
+    # Output mode — ignored at runtime; /row_follow/enable service is the gate.
+    # Kept here so ROS does not warn about an undeclared parameter on startup.
     # -------------------------------------------------------------------------
-    use_direct_cmd_vel: true   # true = /cmd_vel (testing) | false = AOC conditions
+    use_direct_cmd_vel: true   # value ignored; declare only
 
     # -------------------------------------------------------------------------
     # M10: heartbeat timeout for Limbic System PERCEPTION_DEGRADED trigger
