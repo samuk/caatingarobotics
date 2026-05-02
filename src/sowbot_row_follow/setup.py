@@ -27,6 +27,7 @@ setup(
     entry_points={
         'console_scripts': [
             'crop_row_node = sowbot_row_follow.crop_row_node:main',
+            'limbic_row_follow = sowbot_row_follow.limbic_row_follow_node:main',
         ],
     },
 )
