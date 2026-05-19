@@ -176,8 +176,8 @@ planner_server:
     expected_planner_frequency: 0.001  # frequancia que se calcula a rota
     planner_plugins: ["GridBased"]
     GridBased:
-      # O NOME CORRETO É ESTE ABAIXO:
-      plugin: "nav2_navfn_planner/NavfnPlanner"   # Mude de "nav2_smac_planner/SmacPlannerHybrid"
+      # Jazzy usa sintaxe `::` (não `/`) para nomes de plugin.
+      plugin: "nav2_navfn_planner::NavfnPlanner"   # Mude de "nav2_smac_planner::SmacPlannerHybrid"
       downsampling_factor: 1
       tolerance: 0.5
       allow_unknown: true
