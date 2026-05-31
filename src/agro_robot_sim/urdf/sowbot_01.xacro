@@ -1,10 +1,7 @@
 <?xml version="1.0"?>
 <!--
-    • Continuous rubber tracks replace the 4 wheels (visual: long track box + drive/idler rollers)
-    • Chassis split into TWO side body pods sitting above each track
-    • Pods joined by a transverse top frame; vertical mast carries GPS / comms / e-stop
-
-  Reference dimensions (from supplied RTU.V4 drawing):
+  
+  Reference dimensions 
     track ground length   ≈ 1.035 m
     overall body width     ≈ 0.940 m
     overall height         ≈ 0.520 m (chassis) + mast
