@@ -1,6 +1,7 @@
 <?xml version="1.0"?>
-<!--sowbot_01.xacro  —  Visual URDF for sowbot
-    • Continuous rubber tracks replace the 4 wheels (visual: long track box + drive/idler rollers)
+<!--
+  sowbot_urdf.xacro  —
+     • Continuous rubber tracks replace the 4 wheels (visual: long track box + drive/idler rollers)
     • Chassis split into TWO side body pods sitting above each track
     • Pods joined by a transverse top frame; vertical mast carries GPS / comms / e-stop
 
@@ -40,11 +41,11 @@
   <!-- ── Side body pods (two boxes, one above each track) ── -->
   <xacro:property name="pod_len"        value="0.95"/>
   <xacro:property name="pod_wid"        value="0.24"/>
-  <xacro:property name="pod_h"          value="0.30"/>
+  <xacro:property name="pod_h"          value="0.26"/>
   <!-- pod inner face roughly above the track; centre offset = track_half -->
   <xacro:property name="pod_y"          value="${track_half}"/>
-  <!-- pod vertical centre above base_link (above the track unit) -->
-  <xacro:property name="pod_z"          value="${track_height/2 + pod_h/2}"/>
+  <!-- pod vertical centre: drop body so its base overlaps the top of the track unit -->
+  <xacro:property name="pod_z"          value="${track_height/2 + pod_h/2 - 0.05}"/>
 
   <!-- ── Transverse top frame joining the pods ── -->
   <xacro:property name="frame_wid"      value="0.94"/>
@@ -95,12 +96,12 @@
     <link name="${prefix}_track_link">
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
-        <geometry> <box size="${track_length} ${track_width} ${track_height}"/> </geometry>
+        <geometry> <box size="${track_length - 2*drive_radius} ${track_width} ${track_height}"/> </geometry>
         <material name="black"/>
       </visual>
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
-        <geometry> <box size="${track_length} ${track_width} ${track_height}"/> </geometry>
+        <geometry> <box size="${track_length - 2*drive_radius} ${track_width} ${track_height}"/> </geometry>
         <surface>
           <friction>
             <ode>
@@ -124,16 +125,16 @@
       <origin xyz="0 ${y} 0" rpy="0 0 0"/>
     </joint>
 
-    <!-- Drive roller (front) — the powered, spinning joint -->
+    <!-- Drive roller (front) — full track height; forms the rounded front end -->
     <link name="${prefix}_drive_link">
       <visual>
         <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
-        <geometry> <cylinder radius="${drive_radius}" length="${track_width}"/> </geometry>
-        <material name="grey"/>
+        <geometry> <cylinder radius="${track_height/2}" length="${track_width}"/> </geometry>
+        <material name="black"/>
       </visual>
       <collision>
         <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
-        <geometry> <cylinder radius="${drive_radius}" length="${track_width}"/> </geometry>
+        <geometry> <cylinder radius="${track_height/2}" length="${track_width}"/> </geometry>
       </collision>
       <inertial>
         <mass value="4.0"/>
@@ -147,12 +148,12 @@
       <axis xyz="0 ${axis_y} 0"/>
     </joint>
 
-    <!-- Idler roller (rear) — passive spinning visual -->
+    <!-- Idler roller (rear) — full track height; forms the rounded rear end -->
     <link name="${prefix}_idler_link">
       <visual>
         <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
-        <geometry> <cylinder radius="${drive_radius}" length="${track_width}"/> </geometry>
-        <material name="grey"/>
+        <geometry> <cylinder radius="${track_height/2}" length="${track_width}"/> </geometry>
+        <material name="black"/>
       </visual>
       <inertial>
         <mass value="4.0"/>
@@ -174,12 +175,41 @@
        SIDE BODY PODS  (two boxes above the tracks — the split body)
        ══════════════════════════════════════════════════════════════ -->
   <xacro:macro name="pod" params="prefix y">
+    <!-- Pod profile: a trapezoid in side view — flat bottom (full 0.95), shorter
+         top (0.43), with a FULL-HEIGHT 45° slant face at each end running from the
+         bottom-outer edge up to the top-inner edge, so the slant reaches the very
+         end of the body. Central box (top length, full height) + two thin slant
+         plates covering the slope faces.
+         Literals (no math fns / in-macro properties) for parser compatibility:
+           pod_h=0.26, central box len=0.43, slant_len=0.3677, pitch=0.7854 rad,
+           slant centre x=±0.345 (spans bottom-outer 0.475/-0.13 to top-inner 0.215/+0.13) -->
     <link name="${prefix}_pod_link">
+      <!-- central box: top length, full height -->
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
-        <geometry> <box size="${pod_len} ${pod_wid} ${pod_h}"/> </geometry>
+        <geometry> <box size="0.43 ${pod_wid} ${pod_h}"/> </geometry>
         <material name="white"/>
       </visual>
+      <!-- thin bottom plate closing the underside of the full trapezoid footprint -->
+      <visual>
+        <origin xyz="0 0 -0.13" rpy="0 0 0"/>
+        <geometry> <box size="${pod_len} ${pod_wid} 0.02"/> </geometry>
+        <material name="white"/>
+      </visual>
+      <!-- front full-height slant face -->
+      <visual>
+        <origin xyz="0.345 0 0" rpy="0 0.7854 0"/>
+        <geometry> <box size="0.3677 ${pod_wid} 0.005"/> </geometry>
+        <material name="white"/>
+      </visual>
+      <!-- rear full-height slant face -->
+      <visual>
+        <origin xyz="-0.345 0 0" rpy="0 -0.7854 0"/>
+        <geometry> <box size="0.3677 ${pod_wid} 0.005"/> </geometry>
+        <material name="white"/>
+      </visual>
+
+      <!-- collision: simple full box (slant is visual only) -->
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry> <box size="${pod_len} ${pod_wid} ${pod_h}"/> </geometry>
@@ -222,7 +252,7 @@
   <joint name="top_frame_joint" type="fixed">
     <parent link="base_link"/>
     <child  link="top_frame"/>
-    <origin xyz="${pod_len/2 - 0.15} 0 ${pod_z + pod_h/2 + frame_h/2}" rpy="0 0 0"/>
+    <origin xyz="0 0 ${pod_z + pod_h/2 + frame_h/2}" rpy="0 0 0"/>
   </joint>
 
   <!-- ══════════════════════════════════════════════════════════════
@@ -248,7 +278,7 @@
   <joint name="mast_joint" type="fixed">
     <parent link="left_pod_link"/>
     <child  link="mast_link"/>
-    <origin xyz="${pod_len/2 - 0.12} 0 ${pod_h/2 + mast_h/2}" rpy="0 0 0"/>
+    <origin xyz="0.15 0 ${pod_h/2 + mast_h/2}" rpy="0 0 0"/>
   </joint>
 
   <!-- Comms / control enclosure on the mast (the blue box in the drawing) -->
