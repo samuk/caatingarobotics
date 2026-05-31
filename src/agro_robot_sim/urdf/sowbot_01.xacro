@@ -1,7 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  sowbot_urdf.xacro  —
-     • Continuous rubber tracks replace the 4 wheels (visual: long track box + drive/idler rollers)
+    • Continuous rubber tracks replace the 4 wheels (visual: long track box + drive/idler rollers)
     • Chassis split into TWO side body pods sitting above each track
     • Pods joined by a transverse top frame; vertical mast carries GPS / comms / e-stop
 
@@ -39,8 +38,8 @@
   <xacro:property name="base_link_z"    value="${drive_radius}"/>
 
   <!-- ── Side body pods (two boxes, one above each track) ── -->
-  <xacro:property name="pod_len"        value="0.95"/>
-  <xacro:property name="pod_wid"        value="0.24"/>
+  <xacro:property name="pod_len"        value="1.10"/>
+  <xacro:property name="pod_wid"        value="0.30"/>
   <xacro:property name="pod_h"          value="0.26"/>
   <!-- pod inner face roughly above the track; centre offset = track_half -->
   <xacro:property name="pod_y"          value="${track_half}"/>
@@ -175,19 +174,19 @@
        SIDE BODY PODS  (two boxes above the tracks — the split body)
        ══════════════════════════════════════════════════════════════ -->
   <xacro:macro name="pod" params="prefix y">
-    <!-- Pod profile: a trapezoid in side view — flat bottom (full 0.95), shorter
-         top (0.43), with a FULL-HEIGHT 45° slant face at each end running from the
+    <!-- Pod profile: a trapezoid in side view — flat bottom (full 1.10), shorter
+         top (0.58), with a FULL-HEIGHT 45° slant face at each end running from the
          bottom-outer edge up to the top-inner edge, so the slant reaches the very
          end of the body. Central box (top length, full height) + two thin slant
-         plates covering the slope faces.
+         plates covering the slope faces. Sized so each track fits within the pod.
          Literals (no math fns / in-macro properties) for parser compatibility:
-           pod_h=0.26, central box len=0.43, slant_len=0.3677, pitch=0.7854 rad,
-           slant centre x=±0.345 (spans bottom-outer 0.475/-0.13 to top-inner 0.215/+0.13) -->
+           pod_h=0.26, central box len=0.58, slant_len=0.3677, pitch=0.7854 rad,
+           slant centre x=±0.42 (spans bottom-outer 0.55/-0.13 to top-inner 0.29/+0.13) -->
     <link name="${prefix}_pod_link">
       <!-- central box: top length, full height -->
       <visual>
         <origin xyz="0 0 0" rpy="0 0 0"/>
-        <geometry> <box size="0.43 ${pod_wid} ${pod_h}"/> </geometry>
+        <geometry> <box size="0.58 ${pod_wid} ${pod_h}"/> </geometry>
         <material name="white"/>
       </visual>
       <!-- thin bottom plate closing the underside of the full trapezoid footprint -->
@@ -198,13 +197,13 @@
       </visual>
       <!-- front full-height slant face -->
       <visual>
-        <origin xyz="0.345 0 0" rpy="0 0.7854 0"/>
+        <origin xyz="0.42 0 0" rpy="0 0.7854 0"/>
         <geometry> <box size="0.3677 ${pod_wid} 0.005"/> </geometry>
         <material name="white"/>
       </visual>
       <!-- rear full-height slant face -->
       <visual>
-        <origin xyz="-0.345 0 0" rpy="0 -0.7854 0"/>
+        <origin xyz="-0.42 0 0" rpy="0 -0.7854 0"/>
         <geometry> <box size="0.3677 ${pod_wid} 0.005"/> </geometry>
         <material name="white"/>
       </visual>
