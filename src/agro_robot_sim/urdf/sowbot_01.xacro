@@ -1,7 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  
-  Reference dimensions 
+  Reference dimensions (from supplied RTU.V4 drawing):
     track ground length   ≈ 1.035 m
     overall body width     ≈ 0.940 m
     overall height         ≈ 0.520 m (chassis) + mast
@@ -37,11 +36,12 @@
   <!-- ── Side body pods (two boxes, one above each track) ── -->
   <xacro:property name="pod_len"        value="1.10"/>
   <xacro:property name="pod_wid"        value="0.30"/>
-  <xacro:property name="pod_h"          value="0.26"/>
+  <xacro:property name="pod_h"          value="0.32"/>
   <!-- pod inner face roughly above the track; centre offset = track_half -->
   <xacro:property name="pod_y"          value="${track_half}"/>
-  <!-- pod vertical centre: drop body so its base overlaps the top of the track unit -->
-  <xacro:property name="pod_z"          value="${track_height/2 + pod_h/2 - 0.05}"/>
+  <!-- pod centre: body extends down so its base reaches the track axle centre
+       (base_link z=0), giving the drive/idler axles something to attach to -->
+  <xacro:property name="pod_z"          value="0.16"/>
 
   <!-- ── Transverse top frame joining the pods ── -->
   <xacro:property name="frame_wid"      value="0.94"/>
@@ -171,37 +171,39 @@
        SIDE BODY PODS  (two boxes above the tracks — the split body)
        ══════════════════════════════════════════════════════════════ -->
   <xacro:macro name="pod" params="prefix y">
-    <!-- Pod profile: a trapezoid in side view — flat bottom (full 1.10), shorter
-         top (0.58), with a FULL-HEIGHT 45° slant face at each end running from the
-         bottom-outer edge up to the top-inner edge, so the slant reaches the very
-         end of the body. Central box (top length, full height) + two thin slant
-         plates covering the slope faces. Sized so each track fits within the pod.
+    <!-- Pod profile: VERTICAL lower section (full length 1.10, z -0.16..0) so the
+         body sides clear the track, plus a SLANTED upper section (z 0..+0.16) whose
+         top sets back by the rake at each end — vertical walls below, raked shoulders
+         above, matching the reference. Track top (pod-frame z=-0.05) sits inside the
+         vertical wall, so the track cannot foul the body.
          Literals (no math fns / in-macro properties) for parser compatibility:
-           pod_h=0.26, central box len=0.58, slant_len=0.3677, pitch=0.7854 rad,
-           slant centre x=±0.42 (spans bottom-outer 0.55/-0.13 to top-inner 0.29/+0.13) -->
+           pod_h=0.32; lower box h=0.16 @z=-0.08 (full len 1.10);
+           upper box h=0.16 @z=+0.08 (top len 0.58);
+           upper slant_len=0.3053, pitch=0.5517 rad (~31.6°), centre x=±0.42 z=+0.08
+           (spans shoulder-outer 0.55/0.0 to top-inner 0.29/+0.16) -->
     <link name="${prefix}_pod_link">
-      <!-- central box: top length, full height -->
+      <!-- lower vertical box (full length) -->
       <visual>
-        <origin xyz="0 0 0" rpy="0 0 0"/>
-        <geometry> <box size="0.58 ${pod_wid} ${pod_h}"/> </geometry>
+        <origin xyz="0 0 -0.08" rpy="0 0 0"/>
+        <geometry> <box size="${pod_len} ${pod_wid} 0.16"/> </geometry>
         <material name="white"/>
       </visual>
-      <!-- thin bottom plate closing the underside of the full trapezoid footprint -->
+      <!-- upper central box (top length) -->
       <visual>
-        <origin xyz="0 0 -0.13" rpy="0 0 0"/>
-        <geometry> <box size="${pod_len} ${pod_wid} 0.02"/> </geometry>
+        <origin xyz="0 0 0.08" rpy="0 0 0"/>
+        <geometry> <box size="0.58 ${pod_wid} 0.16"/> </geometry>
         <material name="white"/>
       </visual>
-      <!-- front full-height slant face -->
+      <!-- front upper slant face (shoulder up to top) -->
       <visual>
-        <origin xyz="0.42 0 0" rpy="0 0.7854 0"/>
-        <geometry> <box size="0.3677 ${pod_wid} 0.005"/> </geometry>
+        <origin xyz="0.42 0 0.08" rpy="0 0.5517 0"/>
+        <geometry> <box size="0.3053 ${pod_wid} 0.005"/> </geometry>
         <material name="white"/>
       </visual>
-      <!-- rear full-height slant face -->
+      <!-- rear upper slant face -->
       <visual>
-        <origin xyz="-0.42 0 0" rpy="0 -0.7854 0"/>
-        <geometry> <box size="0.3677 ${pod_wid} 0.005"/> </geometry>
+        <origin xyz="-0.42 0 0.08" rpy="0 -0.5517 0"/>
+        <geometry> <box size="0.3053 ${pod_wid} 0.005"/> </geometry>
         <material name="white"/>
       </visual>
 
