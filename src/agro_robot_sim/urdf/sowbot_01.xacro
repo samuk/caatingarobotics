@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  Reference dimensions (from supplied RTU.V4 drawing):
+  Reference dimensions 
     track ground length   ≈ 1.035 m
     overall body width     ≈ 0.940 m
     overall height         ≈ 0.520 m (chassis) + mast
@@ -57,6 +57,7 @@
   <material name="white">        <color rgba="0.88 0.88 0.86 1.0"/> </material>
   <material name="black">        <color rgba="0.10 0.10 0.10 1.0"/> </material>
   <material name="grey">         <color rgba="0.55 0.55 0.55 1.0"/> </material>
+  <material name="darkgrey">     <color rgba="0.35 0.35 0.35 1.0"/> </material>
   <material name="orange">       <color rgba="1.00 0.50 0.00 1.0"/> </material>
   <material name="red">          <color rgba="0.80 0.10 0.10 1.0"/> </material>
 
@@ -170,7 +171,7 @@
   <!-- ══════════════════════════════════════════════════════════════
        SIDE BODY PODS  (two boxes above the tracks — the split body)
        ══════════════════════════════════════════════════════════════ -->
-  <xacro:macro name="pod" params="prefix y">
+  <xacro:macro name="pod" params="prefix y face">
     <!-- Pod profile: VERTICAL lower section (full length 1.10, z -0.16..0) so the
          body sides clear the track, plus a SLANTED upper section (z 0..+0.16) whose
          top sets back by the rake at each end — vertical walls below, raked shoulders
@@ -207,6 +208,23 @@
         <material name="white"/>
       </visual>
 
+      <!-- ── Rectangular access hatch (visual only) ───────────────────
+           A single bolt-on access cover on the OUTER side face of the pod
+           (face param: +Y for left pod, -Y for right), light grey, with a
+           small grab handle. Upper-central side, clear of the lower wall and
+           axle mounts (z=-0.16, x=±0.41). Collision stays the full solid box. -->
+      <visual>
+        <origin xyz="0.04 ${face} 0.03" rpy="0 0 0"/>
+        <geometry> <box size="0.30 0.006 0.18"/> </geometry>
+        <material name="grey"/>
+      </visual>
+      <!-- handle: small grab bar standing off the hatch -->
+      <visual>
+        <origin xyz="0.04 ${face*1.18} 0.03" rpy="0 1.5708 0"/>
+        <geometry> <cylinder radius="0.008" length="0.06"/> </geometry>
+        <material name="darkgrey"/>
+      </visual>
+
       <!-- collision: simple full box (slant is visual only) -->
       <collision>
         <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -224,8 +242,8 @@
     </joint>
   </xacro:macro>
 
-  <xacro:pod prefix="left"  y=" ${pod_y}"/>
-  <xacro:pod prefix="right" y="-${pod_y}"/>
+  <xacro:pod prefix="left"  y=" ${pod_y}" face=" 0.152"/>
+  <xacro:pod prefix="right" y="-${pod_y}" face="-0.152"/>
 
   <!-- ══════════════════════════════════════════════════════════════
        TOP FRAME  (transverse bar joining the two pods)
@@ -297,7 +315,7 @@
     <origin xyz="0.07 0 0.05" rpy="0 0 0"/>
   </joint>
 
-  <!-- E-stop button (the red mushroom on the side) -->
+  <!-- E-stop button (red mushroom) on the front face -->
   <link name="estop_link">
     <visual>
       <origin xyz="0 0 0" rpy="0 ${pi/2} 0"/>
@@ -308,7 +326,7 @@
   <joint name="estop_joint" type="fixed">
     <parent link="left_pod_link"/>
     <child  link="estop_link"/>
-    <origin xyz="${pod_len/2 - 0.20} ${pod_wid/2} 0.02" rpy="0 0 0"/>
+    <origin xyz="${pod_len/2 + 0.015} 0 -0.05" rpy="0 0 0"/>
   </joint>
 
   <!-- ══════════════════════════════════════════════════════════════
