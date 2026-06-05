@@ -43,13 +43,30 @@
 #
 # Adapted for caatinga_vision / Sowbot by Agroecology Lab Ltd
 #
-# Launches crop_row_node with its own dedicated camera (standalone, no shared camera).
-# The crop_row_node opens the camera directly via OpenCV VideoCapture.
-# Run independently or alongside ia.launch.py using a different camera_index.
+# Launches the USB camera (usb_cam_node_exe) AND crop_row_node together in the
+# same launch session, so they share one DDS graph. crop_row_node subscribes to
+# the camera topic published by usb_cam — they are separate processes, not a
+# single node opening the camera directly.
+#
+# Why usb_cam is launched here:
+#   Previously the camera had to be started by hand in a separate terminal
+#   (`ros2 run usb_cam usb_cam_node_exe ...`). On loopback-only CycloneDDS a
+#   separately-started process can land in a different discovery context, so
+#   crop_row_node saw zero publishers and the feed never appeared. Launching
+#   both from one launch file guarantees they are in the same session.
+#
+# QoS note:
+#   crop_row_node subscribes to the image topic RELIABLE. usb_cam defaults to
+#   the sensor convention (BEST_EFFORT), which will NOT connect to a RELIABLE
+#   subscriber. We therefore force usb_cam to publish RELIABLE here via the
+#   qos_overrides parameter, so publisher and subscriber match. (The cleaner
+#   long-term fix is to make crop_row_node subscribe BEST_EFFORT with
+#   qos_profile_sensor_data — see node TODO — but matching at the publisher
+#   keeps this launch self-contained.)
 #
 # Topics published:
-#   /row_nav/image_raw                  Raw camera frames
-#   /row_nav/debug_image                Annotated frames (view in Foxglove)
+#   /devkit/camera/image_raw            Raw camera frames (from usb_cam)
+#   /caatinga_vision/row_nav/debug_image  Annotated frames (view in Foxglove)
 #   /aoc/conditions/row_offset          Normalised lateral offset [-1,1]
 #   /aoc/conditions/row_heading_error   Heading error in radians
 #   /aoc/heartbeat/neo_vision           Perception heartbeat for M10
@@ -57,11 +74,12 @@
 #
 # Usage:
 #   ros2 launch sowbot_row_follow crop_row_nav.launch.py
-#   ros2 launch sowbot_row_follow crop_row_nav.launch.py camera_index:=2
-#   ros2 launch sowbot_row_follow crop_row_nav.launch.py camera_height_m:=0.8 linear_vel:=0.05
+#   ros2 launch sowbot_row_follow crop_row_nav.launch.py video_device:=/dev/video2
+#   ros2 launch sowbot_row_follow crop_row_nav.launch.py use_camera:=false   # subscribe only (sim / external cam)
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -74,18 +92,61 @@ def generate_launch_description():
         [FindPackageShare("sowbot_row_follow"), "config", "crop_row_params.yaml"]
     )
 
+    image_topic = LaunchConfiguration("image_topic")
+
     return LaunchDescription([
 
-        # Command-line overrides — these take precedence over crop_row_params.yaml.
-        # Useful for quick experiments without editing the YAML.
+        # ------------------------------------------------------------------
+        # Launch arguments
+        # ------------------------------------------------------------------
         DeclareLaunchArgument("camera_index", default_value="0"),
         DeclareLaunchArgument(
             "image_topic", default_value="/devkit/camera/image_raw",
-            description="Image topic crop_row_node subscribes to. "
-                        "Default: /devkit/camera/image_raw (USB cam via usb_cam_node_exe). "
+            description="Image topic crop_row_node subscribes to and usb_cam publishes. "
+                        "Default: /devkit/camera/image_raw. "
                         "Override for sim: /caatinga_vision/row_nav/image_raw",
         ),
+        DeclareLaunchArgument(
+            "video_device", default_value="/dev/video0",
+            description="V4L2 device node for the USB camera.",
+        ),
+        DeclareLaunchArgument(
+            "use_camera", default_value="true",
+            description="If true, launch usb_cam here. Set false when the camera is "
+                        "provided elsewhere (sim, external bringup, or a remote Neo).",
+        ),
 
+        # ------------------------------------------------------------------
+        # USB camera — publishes the image topic crop_row_node consumes.
+        # Remapped so usb_cam's default /image_raw becomes image_topic.
+        # QoS forced RELIABLE to match crop_row_node's subscription.
+        # ------------------------------------------------------------------
+        Node(
+            package="usb_cam",
+            executable="usb_cam_node_exe",
+            name="usb_cam",
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("use_camera")),
+            parameters=[{
+                "video_device": LaunchConfiguration("video_device"),
+                "image_width": 640,
+                "image_height": 480,
+                "pixel_format": "yuyv",
+                "framerate": 30.0,
+                "camera_name": "default_cam",
+                # Force the published image stream to RELIABLE so it connects to
+                # crop_row_node's RELIABLE subscription. Without this, usb_cam
+                # publishes BEST_EFFORT and the subscriber silently gets nothing.
+                "qos_overrides./devkit/camera/image_raw.publisher.reliability": "reliable",
+            }],
+            remappings=[
+                ("/image_raw", image_topic),
+            ],
+        ),
+
+        # ------------------------------------------------------------------
+        # Crop-row perception / control node
+        # ------------------------------------------------------------------
         Node(
             package="sowbot_row_follow",
             executable="crop_row_node",
@@ -97,7 +158,7 @@ def generate_launch_description():
                 # 2. Allow launch-arg overrides
                 {
                     "camera_index": LaunchConfiguration("camera_index"),
-                    "image_topic":  LaunchConfiguration("image_topic"),
+                    "image_topic":  image_topic,
                 },
             ],
         ),
