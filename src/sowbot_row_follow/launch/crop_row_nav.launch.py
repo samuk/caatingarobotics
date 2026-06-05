@@ -79,6 +79,12 @@ def generate_launch_description():
         # Command-line overrides — these take precedence over crop_row_params.yaml.
         # Useful for quick experiments without editing the YAML.
         DeclareLaunchArgument("camera_index", default_value="0"),
+        DeclareLaunchArgument(
+            "image_topic", default_value="/devkit/camera/image_raw",
+            description="Image topic crop_row_node subscribes to. "
+                        "Default: /devkit/camera/image_raw (USB cam via usb_cam_node_exe). "
+                        "Override for sim: /caatinga_vision/row_nav/image_raw",
+        ),
 
         Node(
             package="sowbot_row_follow",
@@ -88,8 +94,11 @@ def generate_launch_description():
             parameters=[
                 # 1. Load all defaults from the hardware params file
                 params_file,
-                # 2. Allow launch-arg override for camera index
-                {"camera_index": LaunchConfiguration("camera_index")},
+                # 2. Allow launch-arg overrides
+                {
+                    "camera_index": LaunchConfiguration("camera_index"),
+                    "image_topic":  LaunchConfiguration("image_topic"),
+                },
             ],
         ),
     ])
