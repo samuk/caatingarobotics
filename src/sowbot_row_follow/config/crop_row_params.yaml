@@ -20,6 +20,7 @@ crop_row_node:
     # -------------------------------------------------------------------------
     # Camera hardware — MEASURE THESE ON YOUR ROBOT before field use
     # -------------------------------------------------------------------------
+    image_topic: "/devkit/camera/image_raw"  # USB camera published by usb_cam_node_exe
     camera_index: 0            # Check available devices: v4l2-ctl --list-devices
     image_width: 640
     image_height: 480
