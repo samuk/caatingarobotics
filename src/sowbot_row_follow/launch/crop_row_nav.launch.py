@@ -43,30 +43,32 @@
 #
 # Adapted for caatinga_vision / Sowbot by Agroecology Lab Ltd
 #
-# Launches the USB camera (usb_cam_node_exe) AND crop_row_node together in the
-# same launch session, so they share one DDS graph. crop_row_node subscribes to
-# the camera topic published by usb_cam — they are separate processes, not a
-# single node opening the camera directly.
+# Launches the USB camera (usb_cam_node_exe), crop_row_node, and
+# web_video_server together in one launch session / DDS graph:
+#   - usb_cam publishes /devkit/camera/image_raw
+#   - crop_row_node subscribes to it, publishes /caatinga_vision/row_nav/debug_image
+#   - web_video_server serves ALL image topics over HTTP for browser viewing
 #
 # Why usb_cam is launched here:
-#   Previously the camera had to be started by hand in a separate terminal
-#   (`ros2 run usb_cam usb_cam_node_exe ...`). On loopback-only CycloneDDS a
-#   separately-started process can land in a different discovery context, so
-#   crop_row_node saw zero publishers and the feed never appeared. Launching
-#   both from one launch file guarantees they are in the same session.
+#   On loopback-only CycloneDDS a separately-started process can land in a
+#   different discovery context, so crop_row_node saw zero publishers and the
+#   feed never appeared. Launching everything from one launch file guarantees
+#   they share the same session.
+#
+# Why web_video_server:
+#   Serves the stream over HTTP (default port 8080), so the feed is viewable in
+#   any browser with no X-forwarding and no DDS config on the viewer side.
+#   Browse all topics at  http://localhost:8080
+#   Direct stream:        http://localhost:8080/stream?topic=/caatinga_vision/row_nav/debug_image
 #
 # QoS note:
 #   crop_row_node subscribes to the image topic RELIABLE. usb_cam defaults to
-#   the sensor convention (BEST_EFFORT), which will NOT connect to a RELIABLE
-#   subscriber. We therefore force usb_cam to publish RELIABLE here via the
-#   qos_overrides parameter, so publisher and subscriber match. (The cleaner
-#   long-term fix is to make crop_row_node subscribe BEST_EFFORT with
-#   qos_profile_sensor_data — see node TODO — but matching at the publisher
-#   keeps this launch self-contained.)
+#   BEST_EFFORT, which will NOT connect to a RELIABLE subscriber, so we force
+#   usb_cam to publish RELIABLE here via qos_overrides.
 #
 # Topics published:
 #   /devkit/camera/image_raw            Raw camera frames (from usb_cam)
-#   /caatinga_vision/row_nav/debug_image  Annotated frames (view in Foxglove)
+#   /caatinga_vision/row_nav/debug_image  Annotated frames
 #   /aoc/conditions/row_offset          Normalised lateral offset [-1,1]
 #   /aoc/conditions/row_heading_error   Heading error in radians
 #   /aoc/heartbeat/neo_vision           Perception heartbeat for M10
@@ -75,10 +77,12 @@
 # Usage:
 #   ros2 launch sowbot_row_follow crop_row_nav.launch.py
 #   ros2 launch sowbot_row_follow crop_row_nav.launch.py video_device:=/dev/video2
-#   ros2 launch sowbot_row_follow crop_row_nav.launch.py use_camera:=false   # subscribe only (sim / external cam)
+#   ros2 launch sowbot_row_follow crop_row_nav.launch.py use_camera:=false        # subscribe only
+#   ros2 launch sowbot_row_follow crop_row_nav.launch.py use_web_video:=false     # no HTTP stream
+#   ros2 launch sowbot_row_follow crop_row_nav.launch.py web_video_port:=8081
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, LogInfo
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -93,6 +97,7 @@ def generate_launch_description():
     )
 
     image_topic = LaunchConfiguration("image_topic")
+    web_video_port = LaunchConfiguration("web_video_port")
 
     return LaunchDescription([
 
@@ -102,9 +107,7 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_index", default_value="0"),
         DeclareLaunchArgument(
             "image_topic", default_value="/devkit/camera/image_raw",
-            description="Image topic crop_row_node subscribes to and usb_cam publishes. "
-                        "Default: /devkit/camera/image_raw. "
-                        "Override for sim: /caatinga_vision/row_nav/image_raw",
+            description="Image topic crop_row_node subscribes to and usb_cam publishes.",
         ),
         DeclareLaunchArgument(
             "video_device", default_value="/dev/video0",
@@ -112,8 +115,15 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "use_camera", default_value="true",
-            description="If true, launch usb_cam here. Set false when the camera is "
-                        "provided elsewhere (sim, external bringup, or a remote Neo).",
+            description="If true, launch usb_cam here. Set false for sim / external / remote camera.",
+        ),
+        DeclareLaunchArgument(
+            "use_web_video", default_value="true",
+            description="If true, launch web_video_server to serve image topics over HTTP.",
+        ),
+        DeclareLaunchArgument(
+            "web_video_port", default_value="8080",
+            description="HTTP port for web_video_server.",
         ),
 
         # ------------------------------------------------------------------
@@ -134,9 +144,6 @@ def generate_launch_description():
                 "pixel_format": "yuyv",
                 "framerate": 30.0,
                 "camera_name": "default_cam",
-                # Force the published image stream to RELIABLE so it connects to
-                # crop_row_node's RELIABLE subscription. Without this, usb_cam
-                # publishes BEST_EFFORT and the subscriber silently gets nothing.
                 "qos_overrides./devkit/camera/image_raw.publisher.reliability": "reliable",
             }],
             remappings=[
@@ -153,13 +160,38 @@ def generate_launch_description():
             name="crop_row_node",
             output="screen",
             parameters=[
-                # 1. Load all defaults from the hardware params file
                 params_file,
-                # 2. Allow launch-arg overrides
                 {
                     "camera_index": LaunchConfiguration("camera_index"),
                     "image_topic":  image_topic,
                 },
             ],
         ),
+
+        # ------------------------------------------------------------------
+        # web_video_server — HTTP stream of all image topics for browser viewing
+        # ------------------------------------------------------------------
+        Node(
+            package="web_video_server",
+            executable="web_video_server",
+            name="web_video_server",
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("use_web_video")),
+            parameters=[{
+                "port": web_video_port,
+                "address": "0.0.0.0",
+            }],
+        ),
+
+        # Print the viewing URLs prominently in the launch terminal.
+        LogInfo(condition=IfCondition(LaunchConfiguration("use_web_video")),
+                msg=["\n",
+                     "============================================================\n",
+                     "  Camera stream live in your browser:\n",
+                     "    All topics : http://localhost:", web_video_port, "\n",
+                     "    Debug view : http://localhost:", web_video_port,
+                     "/stream?topic=/caatinga_vision/row_nav/debug_image\n",
+                     "    Raw camera : http://localhost:", web_video_port,
+                     "/stream?topic=/devkit/camera/image_raw\n",
+                     "============================================================"]),
     ])
