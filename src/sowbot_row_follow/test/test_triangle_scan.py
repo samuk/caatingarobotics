@@ -1,6 +1,5 @@
 import numpy as np, sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sowbot_row_follow'))
+sys.path.insert(0, '.')
 from triangle_scan import detect_central_row, TSMParams
 
 H = W = 512
@@ -61,5 +60,49 @@ r = detect_central_row(m)
 check("valid via strip shift", r.valid, f"valid={r.valid}")
 check("anchor near centre col", abs(r.anchor_xy[0]-256) <= 25, f"ax={r.anchor_xy[0]}")
 
-print(f"\n{passed} passed, {failed} failed")
-sys.exit(1 if failed else 0)
+print(f"\nCORE: {passed} passed, {failed} failed")
+
+# ---- extended: morph denoise + temporal filter ----
+from triangle_scan import TSMParams, TSMFilterParams, TSMFilter, detect_central_row as _d
+import numpy as _np
+
+print("=== T6: morph opening removes speckle, keeps row ===")
+m = draw_row(blank(), 256, 256)
+rng = _np.random.default_rng(0)
+# sprinkle 1-2px salt noise off to the left where there's no row
+for _ in range(400):
+    yy = rng.integers(0, H); xx = rng.integers(0, 120)
+    m[yy, xx] = 255
+r_raw = _d(m, TSMParams(morph_kernel=0))
+r_open = _d(m, TSMParams(morph_kernel=5))
+check("row still found after open", r_open.valid and abs(r_open.bottom_x-256) <= 25, f"px={r_open.bottom_x}")
+
+print("=== T7: filter EMA smooths jitter ===")
+f = TSMFilter(TSMFilterParams(alpha=0.4, max_hold=2))
+xs_in = [250, 262, 248, 258, 252]
+out = []
+for xb in xs_in:
+    res = type(r_open)((256,0),(xb,H-1),0.0,float(256),float(xb),True)
+    out.append(f.update(res, W, H).bottom_x)
+# filtered variance < raw variance
+check("EMA reduces variance", _np.var(out) < _np.var(xs_in), f"var_out={_np.var(out):.1f} var_in={_np.var(xs_in):.1f}")
+
+print("=== T8: outlier gate rejects a single wild jump ===")
+f = TSMFilter(TSMFilterParams(alpha=0.5, jump_gate_frac=0.3, max_hold=2))
+for xb in [256, 256, 256]:
+    f.update(type(r_open)((256,0),(xb,H-1),0.0,256.0,float(xb),True), W, H)
+spike = f.update(type(r_open)((460,0),(460,H-1),0.0,460.0,460.0,True), W, H)  # jump 204px > 0.3*512=153
+check("spike held near prior, not jumped", abs(spike.bottom_x-256) < 50, f"px={spike.bottom_x}")
+
+print("=== T9: bounded hold then invalid (heartbeat must die) ===")
+f = TSMFilter(TSMFilterParams(max_hold=2))
+for xb in [256, 256]:
+    f.update(type(r_open)((256,0),(xb,H-1),0.0,256.0,float(xb),True), W, H)
+inv = type(r_open)((0,0),(0,0),0.0,0.0,0.0,False)
+h1 = f.update(inv, W, H); h2 = f.update(inv, W, H); h3 = f.update(inv, W, H)
+check("holds frame 1", h1.valid)
+check("holds frame 2", h2.valid)
+check("invalid after max_hold exceeded", not h3.valid, f"valid={h3.valid}")
+
+print(f"\nEXTENDED: {passed} passed, {failed} failed")
+import sys as _s; _s.exit(1 if failed else 0)
