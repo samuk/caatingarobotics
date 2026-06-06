@@ -85,6 +85,9 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32
 from std_srvs.srv import SetBool
 
+# TSM detector (optional backend). Imported at module load, not per-frame.
+from sowbot_row_follow.triangle_scan import detect_central_row
+
 
 # ===========================================================================
 # Modelo de câmera / Camera model  (de / from camera.py — BSD-2)
@@ -398,6 +401,12 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_b_frac", 0.0)
         self.declare_parameter("tsm_c_frac", 1.0)
         self.declare_parameter("tsm_anchor_min_sum", 1.0)
+        self.declare_parameter("tsm_morph_kernel", 5)       # mask opening; 0 = off
+        # TSM temporal filter (engineering addition)
+        self.declare_parameter("tsm_filter_enable", True)
+        self.declare_parameter("tsm_filter_alpha", 0.4)
+        self.declare_parameter("tsm_filter_jump_gate_frac", 0.35)
+        self.declare_parameter("tsm_filter_max_hold", 2)
 
         p = self.get_parameter
         self.image_topic: str    = p("image_topic").value
@@ -420,7 +429,8 @@ class CropRowNode(Node):
                 "detector não reconhecido, usando 'scanwin'" % self.detector)
             self.detector = "scanwin"
         if self.detector == "tsm":
-            from sowbot_row_follow.triangle_scan import TSMParams
+            from sowbot_row_follow.triangle_scan import (
+                TSMParams, TSMFilterParams, TSMFilter)
             self.tsm_params = TSMParams(
                 s=p("tsm_s").value,
                 amin_frac=p("tsm_amin_frac").value,
@@ -428,7 +438,14 @@ class CropRowNode(Node):
                 b_frac=p("tsm_b_frac").value,
                 c_frac=p("tsm_c_frac").value,
                 anchor_min_sum=p("tsm_anchor_min_sum").value,
+                morph_kernel=p("tsm_morph_kernel").value,
             )
+            self.tsm_filter = TSMFilter(TSMFilterParams(
+                enable=p("tsm_filter_enable").value,
+                alpha=p("tsm_filter_alpha").value,
+                jump_gate_frac=p("tsm_filter_jump_gate_frac").value,
+                max_hold=p("tsm_filter_max_hold").value,
+            ))
 
         # Modelo de câmera para a matriz de interação do servo visual
         # Camera model for the visual servoing interaction matrix
@@ -509,11 +526,12 @@ class CropRowNode(Node):
         centers = get_plant_centers(mask, self.min_area)
 
         if self.detector == "tsm":
-            # Triangle Scan Method: single central row from the ExG mask.
-            # Wrapped as a one-element list so the downstream averaging /
-            # visual-servo code below is identical to the scan-window path.
-            from sowbot_row_follow.triangle_scan import detect_central_row
+            # Triangle Scan Method: single central row from the ExG mask, then
+            # temporal-filtered across frames. Wrapped as a one-element list so
+            # the downstream averaging / visual-servo code below is identical to
+            # the scan-window path.
             tsm = detect_central_row(mask, self.tsm_params)
+            tsm = self.tsm_filter.update(tsm, self.img_w, self.img_h)
             detected_rows = [(tsm.bottom_x, tsm.slope, tsm.intercept)] \
                 if tsm.valid else []
         else:
