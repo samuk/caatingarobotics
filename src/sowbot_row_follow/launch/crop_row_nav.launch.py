@@ -125,6 +125,11 @@ def generate_launch_description():
             "web_video_port", default_value="8080",
             description="HTTP port for web_video_server.",
         ),
+        DeclareLaunchArgument(
+            "detector", default_value="scanwin",
+            description="Row-detection backend: 'scanwin' (ExG scan-window, "
+                        "default) or 'tsm' (Triangle Scan Method).",
+        ),
 
         # ------------------------------------------------------------------
         # USB camera — publishes the image topic crop_row_node consumes.
@@ -164,6 +169,7 @@ def generate_launch_description():
                 {
                     "camera_index": LaunchConfiguration("camera_index"),
                     "image_topic":  image_topic,
+                    "detector":     LaunchConfiguration("detector"),
                 },
             ],
         ),
