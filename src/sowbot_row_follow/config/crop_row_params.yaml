@@ -68,3 +68,8 @@ crop_row_node:
     tsm_b_frac: 0.0            # line-scan Begin point x (fraction of width)
     tsm_c_frac: 1.0            # line-scan Cease point x (fraction of width)
     tsm_anchor_min_sum: 1.0    # min anchor column-sum to accept (else strip-shift)
+    tsm_morph_kernel: 5        # mask opening kernel px (denoise ExG); 0 = off
+    tsm_filter_enable: true    # temporal EMA + outlier-gate + bounded-hold
+    tsm_filter_alpha: 0.4      # EMA weight on new frame; lower = smoother
+    tsm_filter_jump_gate_frac: 0.35  # reject frame if jump > frac*width
+    tsm_filter_max_hold: 2     # hold last across N misses, then invalid (heartbeat dies)
