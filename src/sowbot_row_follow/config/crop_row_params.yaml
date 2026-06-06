@@ -53,3 +53,18 @@ crop_row_node:
     # M10: heartbeat timeout for Limbic System PERCEPTION_DEGRADED trigger
     # -------------------------------------------------------------------------
     heartbeat_timeout_s: 2.0
+
+    # -------------------------------------------------------------------------
+    # Detector backend — selected at launch, NOT here.
+    #   manage.py neo       -> detector=scanwin (default, this file's tuning)
+    #   manage.py neo-tsm   -> detector=tsm (Triangle Scan Method)
+    # Declared here only so ROS does not warn about undeclared params. The
+    # launch file overrides 'detector'. TSM tunables (512x512 frame defaults):
+    # -------------------------------------------------------------------------
+    detector: "scanwin"        # overridden by launch; do not rely on this value
+    tsm_s: 0.2                 # anchor ROI height fraction (h = s*H)
+    tsm_amin_frac: 0.2         # anchor column search start (fraction of width)
+    tsm_amax_frac: 0.7         # anchor column search end (fraction of width)
+    tsm_b_frac: 0.0            # line-scan Begin point x (fraction of width)
+    tsm_c_frac: 1.0            # line-scan Cease point x (fraction of width)
+    tsm_anchor_min_sum: 1.0    # min anchor column-sum to accept (else strip-shift)
