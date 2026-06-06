@@ -387,6 +387,17 @@ class CropRowNode(Node):
         self.declare_parameter("max_omega", 0.4)
         self.declare_parameter("heartbeat_timeout_s", 2.0)
         self.declare_parameter("use_direct_cmd_vel", True)  # kept for param-file compat; ignored — service is the gate
+        # Detector backend: "scanwin" (default, ExG + scan-window line fitting)
+        # or "tsm" (Triangle Scan Method, single central row). Selected at
+        # launch via `manage.py neo` (scanwin) vs `manage.py neo-tsm` (tsm).
+        self.declare_parameter("detector", "scanwin")
+        # TSM tunables (only used when detector == "tsm"); see triangle_scan.py.
+        self.declare_parameter("tsm_s", 0.2)
+        self.declare_parameter("tsm_amin_frac", 0.2)
+        self.declare_parameter("tsm_amax_frac", 0.7)
+        self.declare_parameter("tsm_b_frac", 0.0)
+        self.declare_parameter("tsm_c_frac", 1.0)
+        self.declare_parameter("tsm_anchor_min_sum", 1.0)
 
         p = self.get_parameter
         self.image_topic: str    = p("image_topic").value
@@ -400,6 +411,24 @@ class CropRowNode(Node):
         self.omega_scaler: float = p("omega_scaler").value
         self.max_omega: float    = p("max_omega").value
         self.hb_timeout: float   = p("heartbeat_timeout_s").value
+
+        # Detector selection + TSM config
+        self.detector: str = str(p("detector").value).lower()
+        if self.detector not in ("scanwin", "tsm"):
+            self.get_logger().warn(
+                "detector='%s' unrecognised — falling back to 'scanwin' / "
+                "detector não reconhecido, usando 'scanwin'" % self.detector)
+            self.detector = "scanwin"
+        if self.detector == "tsm":
+            from sowbot_row_follow.triangle_scan import TSMParams
+            self.tsm_params = TSMParams(
+                s=p("tsm_s").value,
+                amin_frac=p("tsm_amin_frac").value,
+                amax_frac=p("tsm_amax_frac").value,
+                b_frac=p("tsm_b_frac").value,
+                c_frac=p("tsm_c_frac").value,
+                anchor_min_sum=p("tsm_anchor_min_sum").value,
+            )
 
         # Modelo de câmera para a matriz de interação do servo visual
         # Camera model for the visual servoing interaction matrix
@@ -478,8 +507,18 @@ class CropRowNode(Node):
         # Pipeline: ExG mask → plant centers → row detection
         mask = compute_exg_mask(bgr)
         centers = get_plant_centers(mask, self.min_area)
-        detected_rows = detect_crop_rows(
-            centers, self.img_w, self.img_h, self.n_windows, self.win_w)
+
+        if self.detector == "tsm":
+            # Triangle Scan Method: single central row from the ExG mask.
+            # Wrapped as a one-element list so the downstream averaging /
+            # visual-servo code below is identical to the scan-window path.
+            from sowbot_row_follow.triangle_scan import detect_central_row
+            tsm = detect_central_row(mask, self.tsm_params)
+            detected_rows = [(tsm.bottom_x, tsm.slope, tsm.intercept)] \
+                if tsm.valid else []
+        else:
+            detected_rows = detect_crop_rows(
+                centers, self.img_w, self.img_h, self.n_windows, self.win_w)
 
         # Publica imagem de depuração independentemente da detecção
         # Always publish debug image regardless of detection result
