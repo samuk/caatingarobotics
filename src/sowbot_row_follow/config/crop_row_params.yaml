@@ -13,6 +13,12 @@
 # angular bias — the robot will still follow rows but not accurately.
 #
 # Tune detection params by watching /row_nav/debug_image in Foxglove.
+#
+# THIS FILE is tuned for the TSM (neo-tsm) "prefer the LEFT of two visible
+# rows" case seen in the field clips: two sparse columns of point-like
+# seedlings, both near centre-right of frame, where the baseline argmax
+# detector swings between them. scanwin (manage.py neo) is unaffected — its
+# tuning is the n_scan_windows/window_width/min_contour_area block below.
 
 crop_row_node:
   ros__parameters:
@@ -30,7 +36,8 @@ crop_row_node:
     camera_tilt_deg: -80.0     # TODO: tilt from horizontal, downward = negative (deg)
 
     # -------------------------------------------------------------------------
-    # Detection tuning — adjust while watching /row_nav/debug_image in Foxglove
+    # scanwin detection tuning (manage.py neo) — unchanged from baseline.
+    # Watch /row_nav/debug_image in Foxglove.
     # -------------------------------------------------------------------------
     n_scan_windows: 8          # Vertical scan columns. More = finer but slower.
     window_width: 80           # Column width (px). Should span one full crop row.
@@ -56,29 +63,72 @@ crop_row_node:
 
     # -------------------------------------------------------------------------
     # Detector backend — selected at launch, NOT here.
-    #   manage.py neo       -> detector=scanwin (default, this file's tuning)
-    #   manage.py neo-tsm   -> detector=tsm (Triangle Scan Method)
-    # Declared here only so ROS does not warn about undeclared params. The
-    # launch file overrides 'detector'. TSM tunables (512x512 frame defaults):
+    #   manage.py neo       -> detector=scanwin (default; scanwin block above)
+    #   manage.py neo-tsm   -> detector=tsm (Triangle Scan Method, below)
+    # The launch file overrides 'detector'; the value here is a placeholder so
+    # ROS does not warn about an undeclared parameter.
     # -------------------------------------------------------------------------
     detector: "scanwin"        # overridden by launch; do not rely on this value
-    tsm_s: 0.2                 # anchor ROI height fraction (h = s*H)
-    tsm_amin_frac: 0.2         # anchor column search start (fraction of width)
-    tsm_amax_frac: 0.7         # anchor column search end (fraction of width)
-    tsm_b_frac: 0.0            # line-scan Begin point x (fraction of width)
-    tsm_c_frac: 1.0            # line-scan Cease point x (fraction of width)
+
+    # -- TSM geometry ---------------------------------------------------------
+    # All *_frac values are fractions of frame width/height, so they are
+    # resolution-independent (the algorithm's internal 512x512 defaults do not
+    # need changing for a 640x480 feed).
+    tsm_s: 0.30                # anchor ROI height fraction. RAISED from 0.2:
+                               #   sparse point-like seedlings need a taller
+                               #   strip to integrate enough plants for a stable
+                               #   column-sum peak.
+    tsm_amin_frac: 0.20        # anchor search start (frac width)
+    tsm_amax_frac: 0.85        # anchor search end (frac width). WIDENED from
+                               #   0.7 so BOTH visible columns fall inside the
+                               #   search range — leftmost_peak then chooses the
+                               #   left one. (For a HARD restriction to the left
+                               #   row, narrow this instead, e.g. 0.55, and the
+                               #   right row is excluded outright — no mode needed.)
+    tsm_b_frac: 0.10           # line-scan Begin x (frac width)
+    tsm_c_frac: 0.90           # line-scan Cease x (frac width). Inset from
+                               #   0.0/1.0 to stop the fitted line tilting to the
+                               #   frame edges on a sparse signal.
     tsm_anchor_min_sum: 1.0    # min anchor column-sum to accept (else strip-shift)
-    tsm_morph_kernel: 5        # mask opening kernel px (denoise ExG); 0 = off
-    tsm_filter_enable: true    # temporal EMA + outlier-gate + bounded-hold
-    tsm_filter_alpha: 0.4      # EMA weight on new frame; lower = smoother
-    tsm_filter_jump_gate_frac: 0.35  # reject frame if jump > frac*width
-    tsm_filter_max_hold: 2     # hold last across N misses, then invalid (heartbeat dies)
-    # Multi-row disambiguation — which row to follow when two are visible.
-    #   argmax (default) | leftmost_peak | rightmost_peak | spatial_prior | weighted
-    # For a hard restriction, narrow tsm_amin_frac/tsm_amax_frac instead.
-    tsm_anchor_select: "argmax"
-    tsm_peak_rel_thresh: 0.6   # leftmost/rightmost_peak: peak >= frac of global max
-    tsm_prior_lambda: 0.01     # spatial_prior: distance penalty (px^-1)
-    tsm_prior_init_frac: 0.3   # spatial_prior: first-frame seed (frac of width)
-    tsm_weight_k: 0.5          # weighted: bias strength
-    tsm_weight_side: "left"    # weighted: preferred side
+
+    # -- TSM mask denoising ---------------------------------------------------
+    tsm_morph_kernel: 3        # opening kernel (px). LOWERED from 5: at this
+                               #   seedling sparsity a 5px open erases small
+                               #   plants. 3 removes speckle without starving the
+                               #   scan. Set 0 to disable entirely.
+                               # NOTE: this is a SYMMETRIC open. A vertical
+                               #   (anisotropic) dilation to bridge a row's dots
+                               #   into a continuous ridge is NOT yet implemented
+                               #   and is the likely next improvement for sparse
+                               #   rows — flagged, not built.
+
+    # -- TSM temporal filter (EMA + outlier-gate + bounded-hold) --------------
+    tsm_filter_enable: true
+    tsm_filter_alpha: 0.35     # EMA weight on new frame; LOWERED slightly from
+                               #   0.4 for a steadier line on a jittery signal.
+    tsm_filter_jump_gate_frac: 0.30  # reject a frame whose anchor/base jumps
+                               #   more than 30% of width — catches single-frame
+                               #   flips to the other row.
+    tsm_filter_max_hold: 2     # hold last estimate across N misses, then report
+                               #   invalid so the heartbeat dies (safety path).
+
+    # -- TSM multi-row disambiguation — PREFER THE LEFT ROW -------------------
+    #   argmax | leftmost_peak | rightmost_peak | spatial_prior | weighted
+    # leftmost_peak chosen as the primary fix: fewest knobs, behaviour obvious
+    # from one frame (line should snap to the LEFT column). If it proves jittery
+    # frame-to-frame, switch to spatial_prior (sticky tracking): set
+    # anchor_select: "spatial_prior" and rely on prior_lambda / prior_init_frac.
+    tsm_anchor_select: "leftmost_peak"
+    tsm_peak_rel_thresh: 0.50  # accept the left peak if it is >= 50% of the
+                               #   strongest peak. FORGIVING (lower than 0.6)
+                               #   because the left row is often the sparser of
+                               #   the two — do not require it to match the right.
+    # spatial_prior fallback params (unused while anchor_select=leftmost_peak):
+    tsm_prior_lambda: 0.02     # distance penalty (px^-1); firmer than 0.01 to
+                               #   hold the row once locked.
+    tsm_prior_init_frac: 0.35  # first-frame seed left-of-centre to grab the left
+                               #   column. ADJUST to the left row's actual x once
+                               #   measured from a binary mask.
+    # weighted-mode params (unused while anchor_select=leftmost_peak):
+    tsm_weight_k: 0.5          # soft-bias strength
+    tsm_weight_side: "left"    # preferred side
