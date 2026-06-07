@@ -150,6 +150,18 @@ check("spatial_prior stays left-side >=7/8", left_n>=7, f"left={left_n}/8")
 
 print(f"\nMULTIROW: {passed} passed, {failed} failed")
 
+print("=== T13: empty/sparse mask is SAFE (no crash) in every anchor mode ===")
+_blank = _np.zeros((H, W), _np.uint8)
+_sparse = _np.zeros((H, W), _np.uint8); _sparse[H-30, W//2] = 255
+for _m in ["argmax","leftmost_peak","rightmost_peak","spatial_prior","weighted"]:
+    for _nm2, _img in [("blank", _blank), ("sparse", _sparse)]:
+        try:
+            _r = _d(_img, TSMParams(anchor_select=_m, amin_frac=0.0, amax_frac=1.0))
+            check(f"{_m}/{_nm2} returns invalid (no crash)", not _r.valid)
+        except Exception as _e:
+            check(f"{_m}/{_nm2} no crash", False, f"{type(_e).__name__}: {_e}")
+
+
 import sys
 print(f"\nTOTAL: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
