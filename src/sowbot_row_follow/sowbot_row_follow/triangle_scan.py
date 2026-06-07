@@ -160,11 +160,15 @@ def _select_anchor_col(col_sums: np.ndarray, p: TSMParams,
     """
     mode = p.anchor_select
     n = len(col_sums)
+    if n == 0:
+        return 0  # empty strip; caller's anchor_min_sum check rejects it
 
     if mode == "leftmost_peak":
-        return min(_find_peaks(col_sums, p.peak_rel_thresh))
+        peaks = _find_peaks(col_sums, p.peak_rel_thresh)
+        return min(peaks) if peaks else int(np.argmax(col_sums))
     if mode == "rightmost_peak":
-        return max(_find_peaks(col_sums, p.peak_rel_thresh))
+        peaks = _find_peaks(col_sums, p.peak_rel_thresh)
+        return max(peaks) if peaks else int(np.argmax(col_sums))
 
     if mode == "spatial_prior":
         idx = np.arange(n)
@@ -217,6 +221,10 @@ def anchor_scan(mask01: np.ndarray, p: TSMParams,
         if strip.size == 0:
             break
         col_sums = strip.sum(axis=0)          # length (amax-amin)
+        # Empty / below-threshold strip: don't run selection on dead data —
+        # shift the ROI down (end-of-row handling) or fall through to None.
+        if col_sums.size == 0 or float(col_sums.max()) < p.anchor_min_sum:
+            continue
         best_local = _select_anchor_col(col_sums, p, amin, prev_anchor)
         # Accept only if the CHOSEN column clears the strength threshold (use
         # the chosen column, not the global max, so a biased pick that lands on
