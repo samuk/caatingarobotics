@@ -73,3 +73,12 @@ crop_row_node:
     tsm_filter_alpha: 0.4      # EMA weight on new frame; lower = smoother
     tsm_filter_jump_gate_frac: 0.35  # reject frame if jump > frac*width
     tsm_filter_max_hold: 2     # hold last across N misses, then invalid (heartbeat dies)
+    # Multi-row disambiguation — which row to follow when two are visible.
+    #   argmax (default) | leftmost_peak | rightmost_peak | spatial_prior | weighted
+    # For a hard restriction, narrow tsm_amin_frac/tsm_amax_frac instead.
+    tsm_anchor_select: "argmax"
+    tsm_peak_rel_thresh: 0.6   # leftmost/rightmost_peak: peak >= frac of global max
+    tsm_prior_lambda: 0.01     # spatial_prior: distance penalty (px^-1)
+    tsm_prior_init_frac: 0.3   # spatial_prior: first-frame seed (frac of width)
+    tsm_weight_k: 0.5          # weighted: bias strength
+    tsm_weight_side: "left"    # weighted: preferred side
