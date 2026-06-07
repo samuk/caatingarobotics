@@ -402,6 +402,13 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_c_frac", 1.0)
         self.declare_parameter("tsm_anchor_min_sum", 1.0)
         self.declare_parameter("tsm_morph_kernel", 5)       # mask opening; 0 = off
+        # Anchor selection (multi-row disambiguation)
+        self.declare_parameter("tsm_anchor_select", "argmax")
+        self.declare_parameter("tsm_peak_rel_thresh", 0.6)
+        self.declare_parameter("tsm_prior_lambda", 0.01)
+        self.declare_parameter("tsm_prior_init_frac", 0.3)
+        self.declare_parameter("tsm_weight_k", 0.5)
+        self.declare_parameter("tsm_weight_side", "left")
         # TSM temporal filter (engineering addition)
         self.declare_parameter("tsm_filter_enable", True)
         self.declare_parameter("tsm_filter_alpha", 0.4)
@@ -439,6 +446,12 @@ class CropRowNode(Node):
                 c_frac=p("tsm_c_frac").value,
                 anchor_min_sum=p("tsm_anchor_min_sum").value,
                 morph_kernel=p("tsm_morph_kernel").value,
+                anchor_select=str(p("tsm_anchor_select").value),
+                peak_rel_thresh=p("tsm_peak_rel_thresh").value,
+                prior_lambda=p("tsm_prior_lambda").value,
+                prior_init_frac=p("tsm_prior_init_frac").value,
+                weight_k=p("tsm_weight_k").value,
+                weight_side=str(p("tsm_weight_side").value),
             )
             self.tsm_filter = TSMFilter(TSMFilterParams(
                 enable=p("tsm_filter_enable").value,
@@ -530,7 +543,8 @@ class CropRowNode(Node):
             # temporal-filtered across frames. Wrapped as a one-element list so
             # the downstream averaging / visual-servo code below is identical to
             # the scan-window path.
-            tsm = detect_central_row(mask, self.tsm_params)
+            tsm = detect_central_row(mask, self.tsm_params,
+                                     prev_anchor=self.tsm_filter.prev_anchor)
             tsm = self.tsm_filter.update(tsm, self.img_w, self.img_h)
             detected_rows = [(tsm.bottom_x, tsm.slope, tsm.intercept)] \
                 if tsm.valid else []
