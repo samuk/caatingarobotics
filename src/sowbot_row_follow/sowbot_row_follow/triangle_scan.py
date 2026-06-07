@@ -49,6 +49,29 @@ class TSMParams:
     # the right denoise for a pixel-sum method (contour-free, unlike scanwin's
     # min_contour_area). Set 0 to disable and get literal paper behaviour.
     morph_kernel: int = 5   # opening kernel (px); 0 = off
+    # ── Anchor selection mode ────────────────────────────────────────────────
+    # When two crop rows are visible the column-sum has two near-equal peaks and
+    # a plain argmax flips between them frame-to-frame. anchor_select biases the
+    # *detection* (not just the output filter) toward one row. Modes:
+    #   "argmax"        — tallest column-sum wins (paper default; no bias).
+    #   "leftmost_peak" — leftmost peak whose sum >= peak_rel_thresh * global max
+    #                     (prefer left row even when slightly weaker).
+    #   "rightmost_peak"— mirror of the above (prefer right row).
+    #   "spatial_prior" — argmax of (col_sum - prior_lambda*|col - prev_anchor|):
+    #                     sticky tracking that resists switching rows once locked.
+    #                     Seeded by prior_init_frac on the first frame.
+    #   "weighted"      — argmax of (col_sum * side_weight), where side_weight
+    #                     ramps linearly from 1+weight_k on the preferred side to
+    #                     1 on the other. A much stronger opposite row can still
+    #                     win (soft bias, unlike a hard search-window clamp).
+    # NOTE: a hard left/right restriction needs no mode — just narrow
+    # amin_frac/amax_frac so the unwanted row falls outside the search range.
+    anchor_select: str = "argmax"
+    peak_rel_thresh: float = 0.6   # leftmost/rightmost_peak: frac of global max
+    prior_lambda: float = 0.01     # spatial_prior: px-distance penalty weight
+    prior_init_frac: float = 0.3   # spatial_prior: first-frame seed (frac of W)
+    weight_k: float = 0.5          # weighted: bias strength on preferred side
+    weight_side: str = "left"      # weighted: "left" or "right" preferred
 
 
 @dataclass
@@ -106,13 +129,77 @@ def _normalise_mask(mask: np.ndarray, morph_kernel: int = 0) -> np.ndarray:
     return binary.astype(np.float32)
 
 
-def anchor_scan(mask01: np.ndarray, p: TSMParams) -> Optional[int]:
+def _find_peaks(col_sums: np.ndarray, rel_thresh: float) -> list:
+    """Local maxima with value >= rel_thresh * global max. Returns indices."""
+    n = len(col_sums)
+    if n == 0:
+        return []
+    gmax = float(col_sums.max())
+    if gmax <= 0:
+        return []
+    floor = rel_thresh * gmax
+    peaks = []
+    for i in range(n):
+        v = col_sums[i]
+        if v < floor:
+            continue
+        left_ok = (i == 0) or (col_sums[i - 1] <= v)
+        right_ok = (i == n - 1) or (col_sums[i + 1] <= v)
+        if left_ok and right_ok:
+            peaks.append(i)
+    # Fallback: if the plateau logic found nothing, take the global argmax.
+    return peaks or [int(np.argmax(col_sums))]
+
+
+def _select_anchor_col(col_sums: np.ndarray, p: TSMParams,
+                       amin: int, prev_anchor: Optional[int]) -> int:
+    """Pick the local anchor column index within col_sums per anchor_select.
+
+    col_sums is indexed from amin; returned index is also local (add amin for
+    image coords). prev_anchor is in IMAGE coords (or None on first frame).
+    """
+    mode = p.anchor_select
+    n = len(col_sums)
+
+    if mode == "leftmost_peak":
+        return min(_find_peaks(col_sums, p.peak_rel_thresh))
+    if mode == "rightmost_peak":
+        return max(_find_peaks(col_sums, p.peak_rel_thresh))
+
+    if mode == "spatial_prior":
+        idx = np.arange(n)
+        if prev_anchor is None:
+            prev_local = p.prior_init_frac * n   # seed (e.g. left third)
+        else:
+            prev_local = prev_anchor - amin
+        score = col_sums - p.prior_lambda * np.abs(idx - prev_local)
+        return int(np.argmax(score))
+
+    if mode == "weighted":
+        idx = np.arange(n)
+        if n > 1:
+            ramp = idx / float(n - 1)            # 0 at left .. 1 at right
+        else:
+            ramp = np.zeros(1)
+        if p.weight_side == "right":
+            w = 1.0 + p.weight_k * ramp
+        else:  # left (default)
+            w = 1.0 + p.weight_k * (1.0 - ramp)
+        return int(np.argmax(col_sums * w))
+
+    # "argmax" (default) and any unknown mode
+    return int(np.argmax(col_sums))
+
+
+def anchor_scan(mask01: np.ndarray, p: TSMParams,
+                prev_anchor: Optional[int] = None) -> Optional[int]:
     """Return anchor column x (apex A) on the top edge, or None.
 
     Sums each column over a top ROI strip of height h = s*H, restricted to
-    columns [Amin, Amax]. A is the argmax column. If the best column-sum is
-    below anchor_min_sum, shift the strip down by h and retry (up to
-    max_strip_shifts times) to handle end-of-row where plants recede.
+    columns [Amin, Amax]. The winning column is chosen per p.anchor_select
+    (see TSMParams). If the best column-sum is below anchor_min_sum, shift the
+    strip down by h and retry (up to max_strip_shifts times) for end-of-row.
+    prev_anchor (image coords) is only used by the "spatial_prior" mode.
     """
     h_img, w_img = mask01.shape
     h = max(1, int(round(p.s * h_img)))
@@ -130,7 +217,10 @@ def anchor_scan(mask01: np.ndarray, p: TSMParams) -> Optional[int]:
         if strip.size == 0:
             break
         col_sums = strip.sum(axis=0)          # length (amax-amin)
-        best_local = int(np.argmax(col_sums))
+        best_local = _select_anchor_col(col_sums, p, amin, prev_anchor)
+        # Accept only if the CHOSEN column clears the strength threshold (use
+        # the chosen column, not the global max, so a biased pick that lands on
+        # a too-weak column correctly triggers the strip shift / end-of-row).
         if col_sums[best_local] >= p.anchor_min_sum:
             return amin + best_local
     return None
@@ -182,7 +272,8 @@ def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> int:
 
 
 def detect_central_row(mask: np.ndarray,
-                       params: Optional[TSMParams] = None) -> TSMResult:
+                       params: Optional[TSMParams] = None,
+                       prev_anchor: Optional[int] = None) -> TSMResult:
     """Run TSM on a crop-row mask. Returns the central row in node convention.
 
     Node convention: x = m*y + b  (x as a function of y), matching the existing
@@ -191,12 +282,15 @@ def detect_central_row(mask: np.ndarray,
         m = (px - ax) / (H - 1)
         b = ax                       (since x at y=0 is ax)
     bottom_x = px.
+
+    prev_anchor (image coords, from the previous accepted frame) is consumed
+    only by the "spatial_prior" anchor_select mode for sticky row tracking.
     """
     p = params or TSMParams()
     mask01 = _normalise_mask(mask, p.morph_kernel)
     h_img, _ = mask01.shape
 
-    ax = anchor_scan(mask01, p)
+    ax = anchor_scan(mask01, p, prev_anchor)
     if ax is None:
         return TSMResult((0, 0), (0, 0), 0.0, 0.0, 0.0, False)
 
@@ -240,6 +334,16 @@ class TSMFilter:
         self._ax = None
         self._px = None
         self._misses = 0
+
+    @property
+    def prev_anchor(self) -> Optional[int]:
+        """Current filtered anchor x in image coords, or None before lock.
+
+        Feed back into detect_central_row(prev_anchor=...) for the
+        "spatial_prior" anchor_select mode so sticky tracking follows the
+        smoothed estimate rather than the raw per-frame anchor.
+        """
+        return None if self._ax is None else int(round(self._ax))
 
     def _emit(self, h_img: int) -> TSMResult:
         denom = float(h_img - 1) if h_img > 1 else 1.0
