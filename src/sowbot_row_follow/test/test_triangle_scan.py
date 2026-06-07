@@ -1,5 +1,5 @@
-import numpy as np, sys
-sys.path.insert(0, '.')
+import numpy as np, sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'sowbot_row_follow'))
 from triangle_scan import detect_central_row, TSMParams
 
 H = W = 512
@@ -105,4 +105,51 @@ check("holds frame 2", h2.valid)
 check("invalid after max_hold exceeded", not h3.valid, f"valid={h3.valid}")
 
 print(f"\nEXTENDED: {passed} passed, {failed} failed")
-import sys as _s; _s.exit(1 if failed else 0)
+
+# ---- extended: multi-row anchor selection ----
+from triangle_scan import anchor_scan as _ascan, _normalise_mask as _nm
+
+def _converging(l_top,l_bot,r_top,r_bot,width=12):
+    mm=_np.zeros((H,W),_np.uint8)
+    for y in range(H):
+        t=y/(H-1)
+        lx=int(round(l_top+(l_bot-l_top)*t)); rx=int(round(r_top+(r_bot-r_top)*t))
+        mm[y,max(0,lx-width//2):lx+width//2]=255
+        mm[y,max(0,rx-width//2):rx+width//2]=255
+    return mm
+
+print("=== T10: argmax flips between rows; leftmost_peak does not ===")
+af=[]; lf=[]
+for fr in range(8):
+    mm=_converging(230,120,290,400)
+    if fr%2: mm[:,285:295]=255
+    else:    mm[:,225:235]=255
+    af.append(int(_d(mm,TSMParams(anchor_select="argmax",amin_frac=0.0,amax_frac=1.0)).anchor_xy[0]))
+    lf.append(int(_d(mm,TSMParams(anchor_select="leftmost_peak",peak_rel_thresh=0.5,amin_frac=0.0,amax_frac=1.0)).anchor_xy[0]))
+check("argmax DOES flip (reproduces bug)", max(af)-min(af) > 40, f"range={max(af)-min(af)}")
+check("leftmost_peak stable", max(lf)-min(lf) < 40, f"range={max(lf)-min(lf)}")
+
+print("=== T11: rightmost_peak mirrors to right row ===")
+mm=_converging(230,120,290,400)
+ar=_d(mm,TSMParams(anchor_select="rightmost_peak",peak_rel_thresh=0.5,amin_frac=0.0,amax_frac=1.0))
+al=_d(mm,TSMParams(anchor_select="leftmost_peak",peak_rel_thresh=0.5,amin_frac=0.0,amax_frac=1.0))
+check("rightmost > leftmost", ar.anchor_xy[0] > al.anchor_xy[0], f"r={ar.anchor_xy[0]} l={al.anchor_xy[0]}")
+
+print("=== T12: spatial_prior seeded left stays left through flips ===")
+ff=TSMFilter(TSMFilterParams(alpha=0.5,jump_gate_frac=1.0,max_hold=9))
+pp=TSMParams(anchor_select="spatial_prior",prior_lambda=0.02,prior_init_frac=0.31,amin_frac=0.0,amax_frac=1.0)
+sp=[]
+for fr in range(8):
+    mm=_converging(230,120,290,400)
+    if fr%2: mm[:,285:295]=255
+    else:    mm[:,225:235]=255
+    rr=ff.update(_d(mm,pp,prev_anchor=ff.prev_anchor),W,H)
+    sp.append(int(rr.bottom_x))
+left_n=sum(1 for x in sp if x < W//2)
+check("spatial_prior stays left-side >=7/8", left_n>=7, f"left={left_n}/8")
+
+print(f"\nMULTIROW: {passed} passed, {failed} failed")
+
+import sys
+print(f"\nTOTAL: {passed} passed, {failed} failed")
+sys.exit(1 if failed else 0)
