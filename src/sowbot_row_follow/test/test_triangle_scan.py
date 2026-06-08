@@ -162,6 +162,25 @@ for _m in ["argmax","leftmost_peak","rightmost_peak","spatial_prior","weighted"]
             check(f"{_m}/{_nm2} no crash", False, f"{type(_e).__name__}: {_e}")
 
 
+print("=== T14: near-vertical prior clamps steep lines, preserves vertical ===")
+import math as _math
+def _angle(_r): return _math.degrees(_math.atan2(abs(_r.bottom_x-_r.anchor_xy[0]), H-1))
+def _diag(xt, xb, w=12):
+    _m=_np.zeros((H,W),_np.uint8)
+    for _y in range(H):
+        _x=int(round(xt+(xb-xt)*_y/(H-1)))
+        _m[_y,max(0,_x-w//2):_x+w//2]=255
+    return _m
+_steep=_diag(int(W*0.5), int(W*0.92))  # ~22 deg
+_off=_d(_steep, TSMParams(max_angle_deg=0, amin_frac=0.0, amax_frac=1.0, b_frac=0.0, c_frac=1.0))
+_on =_d(_steep, TSMParams(max_angle_deg=15, amin_frac=0.0, amax_frac=1.0, b_frac=0.0, c_frac=1.0))
+check("unconstrained exceeds 15deg", _angle(_off) > 15, f"{_angle(_off):.1f}")
+check("constrained <= 16deg", _angle(_on) <= 16, f"{_angle(_on):.1f}")
+_vert=_diag(int(W*0.5), int(W*0.52))
+_rv=_d(_vert, TSMParams(max_angle_deg=15, amin_frac=0.0, amax_frac=1.0, b_frac=0.0, c_frac=1.0))
+check("near-vertical preserved & valid", _rv.valid and _angle(_rv) < 5, f"{_angle(_rv):.1f}")
+
+
 import sys
 print(f"\nTOTAL: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
