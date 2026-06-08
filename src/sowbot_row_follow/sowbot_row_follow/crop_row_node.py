@@ -409,6 +409,7 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_prior_init_frac", 0.3)
         self.declare_parameter("tsm_weight_k", 0.5)
         self.declare_parameter("tsm_weight_side", "left")
+        self.declare_parameter("tsm_max_angle_deg", 15.0)  # near-vertical prior; 0 = off
         # TSM temporal filter (engineering addition)
         self.declare_parameter("tsm_filter_enable", True)
         self.declare_parameter("tsm_filter_alpha", 0.4)
@@ -452,6 +453,7 @@ class CropRowNode(Node):
                 prior_init_frac=p("tsm_prior_init_frac").value,
                 weight_k=p("tsm_weight_k").value,
                 weight_side=str(p("tsm_weight_side").value),
+                max_angle_deg=p("tsm_max_angle_deg").value,
             )
             self.tsm_filter = TSMFilter(TSMFilterParams(
                 enable=p("tsm_filter_enable").value,
