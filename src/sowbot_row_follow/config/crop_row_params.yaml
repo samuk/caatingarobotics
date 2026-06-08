@@ -82,7 +82,7 @@ crop_row_node:
     tsm_prior_init_frac: 0.3   # spatial_prior: first-frame seed (frac of width)
     tsm_weight_k: 0.5          # weighted: bias strength
     tsm_weight_side: "left"    # weighted: preferred side
-    tsm_max_angle_deg: 0.0     # DISABLED (the 15deg clamp made it worse). NOTE:
+    tsm_max_angle_deg: 15.0     # DISABLED (the 15deg clamp made it worse). NOTE:
                                #   code default is 15, so this MUST be explicitly
                                #   0 to turn the clamp off — deleting the line
                                #   would re-enable it at the code default.
