@@ -76,14 +76,13 @@ crop_row_node:
     # Multi-row disambiguation — which row to follow when two are visible.
     #   argmax (default) | leftmost_peak | rightmost_peak | spatial_prior | weighted
     # For a hard restriction, narrow tsm_amin_frac/tsm_amax_frac instead.
-    tsm_anchor_select: "argmax"
+    tsm_anchor_select: "leftmost_peak"   # PREFER LEFT (was OK in field)
     tsm_peak_rel_thresh: 0.6   # leftmost/rightmost_peak: peak >= frac of global max
     tsm_prior_lambda: 0.01     # spatial_prior: distance penalty (px^-1)
     tsm_prior_init_frac: 0.3   # spatial_prior: first-frame seed (frac of width)
     tsm_weight_k: 0.5          # weighted: bias strength
     tsm_weight_side: "left"    # weighted: preferred side
-    tsm_max_angle_deg: 15.0    # near-vertical prior: reject row lines more than
-                               #   this many degrees off image-vertical (clamps
-                               #   the line-scan to a cone around the apex).
-                               #   0 = disabled. RAISE if the row legitimately
-                               #   appears tilted (steep camera, headland turn).
+    tsm_max_angle_deg: 0.0     # DISABLED (the 15deg clamp made it worse). NOTE:
+                               #   code default is 15, so this MUST be explicitly
+                               #   0 to turn the clamp off — deleting the line
+                               #   would re-enable it at the code default.
