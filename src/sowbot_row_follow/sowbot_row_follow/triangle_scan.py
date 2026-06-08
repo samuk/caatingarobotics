@@ -72,6 +72,15 @@ class TSMParams:
     prior_init_frac: float = 0.3   # spatial_prior: first-frame seed (frac of W)
     weight_k: float = 0.5          # weighted: bias strength on preferred side
     weight_side: str = "left"      # weighted: "left" or "right" preferred
+    # ── Near-vertical prior ──────────────────────────────────────────────────
+    # Reject candidate lines more than max_angle_deg off image-vertical by
+    # restricting the line-scan bottom point to a cone around the apex:
+    #   |P.x - A.x| <= (H-1) * tan(max_angle_deg).
+    # The line CANNOT be chosen steeper than this (constraint on the search, not
+    # a veto on the result), so a sparse/noisy frame can't tilt the fit to a
+    # diagonal. Set 0 (or >=90) to disable and allow any angle. Raise it if the
+    # row legitimately appears tilted (steep camera angle, headland re-acquire).
+    max_angle_deg: float = 15.0
 
 
 @dataclass
@@ -254,7 +263,13 @@ def _line_pixel_sum(mask01: np.ndarray, ax: int, ay: int,
 
 
 def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> int:
-    """Return P_r.x: bottom-edge column maximising pixel-sum along A->P."""
+    """Return P_r.x: bottom-edge column maximising pixel-sum along A->P.
+
+    The candidate range is the configured B-C span intersected with a
+    near-vertical cone around the apex: |P.x - anchor_x| <= (H-1)*tan(angle),
+    so the chosen line cannot exceed p.max_angle_deg off image-vertical.
+    """
+    import math
     h_img, w_img = mask01.shape
     ay = 0                       # A lies on the top edge
     py = h_img - 1               # B, C, P_r lie on the bottom edge
@@ -263,6 +278,14 @@ def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> int:
     b_x = max(0, min(b_x, w_img - 1))
     c_x = max(0, min(c_x, w_img - 1))
     lo, hi = min(b_x, c_x), max(b_x, c_x)
+
+    # Near-vertical prior: clamp the bottom-point range to the angle cone.
+    if p.max_angle_deg and 0 < p.max_angle_deg < 90:
+        dx = (h_img - 1) * math.tan(math.radians(p.max_angle_deg))
+        lo = max(lo, int(math.floor(anchor_x - dx)))
+        hi = min(hi, int(math.ceil(anchor_x + dx)))
+        if lo > hi:               # cone falls entirely outside B-C: best effort
+            lo = hi = int(max(0, min(anchor_x, w_img - 1)))
 
     if p.line_samples and p.line_samples > 1:
         cands = np.linspace(lo, hi, p.line_samples).round().astype(int)
