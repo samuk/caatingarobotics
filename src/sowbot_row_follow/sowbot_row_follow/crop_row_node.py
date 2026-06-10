@@ -90,18 +90,16 @@ from sowbot_row_follow.triangle_scan import detect_central_row
 
 # ===========================================================================
 # Modelo de câmera / Camera model  (de / from camera.py — BSD-2)
-# Apenas os campos usados pela matriz de interação do controlador.
-# Only the fields used by the controller interaction matrix.
 # ===========================================================================
 class Camera:
     def __init__(self, f=1, deltaz=1.2, deltay=0, scale=1,
                  tilt_angle=np.deg2rad(-80), pixel_size=0.96,
                  cx=0, cy=0, ar=1):
         self.f = f
-        self.deltaz = deltaz      # altura acima do solo (m) / height above ground (m)
-        self.deltay = deltay      # deslocamento frontal da câmera / forward camera offset from wheel axis
+        self.deltaz = deltaz
+        self.deltay = deltay
         self.scale = scale
-        self.tilt_angle = tilt_angle  # ângulo de inclinação (rad) / tilt angle (rad)
+        self.tilt_angle = tilt_angle
         self.pixel_size = pixel_size
         self.cx = cx
         self.cy = cy
@@ -111,10 +109,8 @@ class Camera:
 # ===========================================================================
 # Controlador de servo visual / Visual servoing controller  (de / from controller.py — BSD-2)
 # Matriz de interação de Cherubini & Chaumette, preservada exatamente.
-# Cherubini & Chaumette interaction matrix, preserved exactly.
 # ===========================================================================
 def wrap_to_pi(theta: float) -> float:
-    # Normaliza ângulo para [-pi, pi] / Wrap angle to [-pi, pi]
     while theta < -math.pi:
         theta += 2 * math.pi
     while theta > math.pi:
@@ -126,30 +122,15 @@ def visual_servoing_ctl(camera: Camera,
                         desired_state: np.ndarray,
                         actual_state: np.ndarray,
                         v_des: float) -> float:
-    """
-    Calcula a correção de velocidade angular (rad/s).
-    Compute angular velocity correction (rad/s).
-    desired_state: [x_desejado, y_desejado, theta_desejado]  (características no frame da imagem)
-                   [x_desired,  y_desired,  theta_desired]   (image-frame features)
-    actual_state:  [x_atual,    y_atual,    theta_atual]
-                   [x_actual,   y_actual,   theta_actual]
-    v_des: velocidade frontal desejada (m/s) / desired forward speed (m/s)
-    Preservado de / Preserved from controller.visualServoingCtl (BSD-2).
-    """
     x = actual_state[0]
     y = actual_state[1]
     theta = actual_state[2]
-    # Ganhos do controlador / Controller gains
     lambda_x_1 = 10
     lambda_w_1 = 3000
     lambdavec = np.array([lambda_x_1, lambda_w_1])
-    # Tipo 0 = seguimento de fileira / Type 0 = row following (not column)
     controller_type = 0
     angle = camera.tilt_angle
     delta_z = camera.deltaz
-    # Matriz de interação (Cherubini & Chaumette)
-    # Relaciona variáveis de controle [v, w] às mudanças de características [x, y, theta]
-    # Relates control variables [v, w] to feature changes [x, y, theta]
     IntMat = np.array([
         [(-np.sin(angle) - y * np.cos(angle)) / delta_z, 0,
          x * (np.sin(angle) + y * np.cos(angle)) / delta_z,
@@ -163,8 +144,6 @@ def visual_servoing_ctl(camera: Camera,
          -(y * np.sin(theta) + x * np.cos(theta)) * np.cos(theta),
          -(y * np.sin(theta) + x * np.cos(theta)) * np.sin(theta), -1]
     ])
-    # Transformação do frame do robô para o frame da câmera
-    # Transformation from robot frame to camera frame
     delta_y = camera.deltay
     TransfMat = np.array([
         [0,               -delta_y],
@@ -174,164 +153,101 @@ def visual_servoing_ctl(camera: Camera,
         [0,               -np.cos(angle)],
         [0,               -np.sin(angle)],
     ])
-    Trans_vel = TransfMat[:, 0]  # componente linear / linear component
-    Trans_ang = TransfMat[:, 1]  # componente angular / angular component
-    # Jacobiano: relaciona controles do robô às mudanças de características
-    # Jacobian: relates robot controls to feature changes
+    Trans_vel = TransfMat[:, 0]
+    Trans_ang = TransfMat[:, 1]
     Jac = np.array([IntMat[controller_type, :], IntMat[2, :]])
     Jac_vel = np.matmul(Jac, Trans_vel)
     Jac_ang = np.matmul(Jac, Trans_ang)
-    Jac_ang_pi = np.linalg.pinv([Jac_ang])  # pseudoinversa / pseudoinverse
-    # Erro entre estado atual e desejado / Error between actual and desired state
+    Jac_ang_pi = np.linalg.pinv([Jac_ang])
     trans_delta = actual_state[controller_type] - desired_state[controller_type]
     ang_delta = actual_state[2] - desired_state[2]
     delta = np.array([trans_delta, wrap_to_pi(ang_delta)])
-    # Lei de controle de realimentação / Feedback control law
     temp = lambdavec * delta
     ang_fb = np.matmul(-Jac_ang_pi.T, (temp + Jac_vel * v_des))
     return float(np.squeeze(ang_fb))
 
 
 # ===========================================================================
-# Índice de vegetação ExG + extração de contornos
-# ExG vegetation index + contour extraction  (de / from imageProc.py — BSD-2)
+# Índice de vegetação ExG + extração de contornos  (de / from imageProc.py — BSD-2)
 # ===========================================================================
 def compute_exg_mask(bgr_img: np.ndarray):
-    """
-    Índice de Verde Excedente → máscara binária de vegetação.
-    Excess Green Index → binary vegetation mask.
-    De / From imageProc.getExgMask (BSD-2).
-    """
-    # Converte para int32 para permitir valores negativos no cálculo ExG
-    # Cast to int32 to allow negative values in ExG calculation
     img = bgr_img.astype("int32")
     b, g, r = img[:, :, 0], img[:, :, 1], img[:, :, 2]
-    # ExG = 2G - R - B  (realça vegetação verde / highlights green vegetation)
     exg = 2 * g - r - b
-    exg[exg < 0] = 0  # descarta valores negativos / discard negative values
+    exg[exg < 0] = 0
     exg = exg.astype("uint8")
-    # Suavização gaussiana antes da limiarização para reduzir ruído
-    # Gaussian blur before thresholding to reduce noise
     blur = cv.GaussianBlur(exg, (5, 5), 0)
-    # Limiarização de Otsu: encontra automaticamente o melhor limiar
-    # Otsu thresholding: automatically finds the best threshold
     _, mask = cv.threshold(blur, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
-    # Dilatação para conectar regiões de plantas próximas
-    # Dilation to connect nearby plant regions
     kernel = np.ones((10, 10), np.uint8)
     mask = cv.dilate(mask, kernel, iterations=1)
     return mask
 
 
 def get_plant_centers(mask: np.ndarray, min_area: float) -> np.ndarray:
-    """
-    Centros de contorno da máscara binária. Retorna array (N,2) de (x,y).
-    Contour centers from binary mask. Returns (N,2) array of (x,y).
-    De / From imageProc.processRGBImage (BSD-2).
-    """
     contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
     centers = []
     for c in contours:
-        # Filtra contornos pequenos (ruído de solo, pedras, etc.)
-        # Filter small contours (soil noise, stones, etc.)
         if cv.contourArea(c) >= min_area:
             M = cv.moments(c)
             if M["m00"] > 0:
-                # Centro de massa do contorno / Contour centroid
                 centers.append((int(M["m10"] / M["m00"]),
                                  int(M["m01"] / M["m00"])))
     return np.array(centers) if centers else np.empty((0, 2), dtype=int)
 
 
 # ===========================================================================
-# Ajuste de linha por janela de varredura
-# Scan-window line fitting  (de / from imageProc.findLinesInImage — BSD-2)
+# Ajuste de linha por janela de varredura  (de / from imageProc.findLinesInImage — BSD-2)
 # ===========================================================================
 def fit_line(points_xy: np.ndarray):
-    """
-    Ajusta x = m*y + b aos centros das plantas.
-    Fit x = m*y + b to plant centers.
-    De / From helpers geométricos do imageProc (BSD-2).
-    Usa y como variável independente pois as fileiras são aproximadamente verticais
-    na imagem — ajuste padrão x=f(y) é mais estável que y=f(x) neste caso.
-    Uses y as the independent variable because rows run approximately vertical
-    in the image — fitting x=f(y) is more stable than y=f(x) here.
-    """
     if len(points_xy) < 2:
         return None, None
     y = points_xy[:, 1].astype(float)
     x = points_xy[:, 0].astype(float)
-    # Evita ajuste degenerado quando todos os pontos têm a mesma altura
-    # Avoid degenerate fit when all points share the same row
     if np.std(y) < 1.0:
         return None, None
-    m, b = np.polyfit(y, x, 1)  # inclinação e intercepto / slope and intercept
+    m, b = np.polyfit(y, x, 1)
     return m, b
 
 
 def detect_crop_rows(centers: np.ndarray,
                      img_w: int, img_h: int,
                      n_windows: int, win_w: int) -> list:
-    """
-    Divide a imagem em n_windows colunas verticais e ajusta uma linha por coluna.
-    Divide the image into n_windows vertical columns and fit a line per column.
-    De / From imageProc.findLinesInImage (BSD-2).
-    Retorna / Returns: lista de (bottom_x, slope, intercept) por fileira detectada.
-                       list of (bottom_x, slope, intercept) per detected row.
-    """
     if len(centers) == 0:
         return []
-    # Largura de cada passo de varredura / Width of each scan step
     step = img_w / n_windows
     rows = []
     for i in range(n_windows):
-        # Limites da janela atual / Current window bounds
         left = i * step
         right = left + win_w
-        # Pontos dentro desta janela / Points inside this window
         in_win = centers[(centers[:, 0] >= left) & (centers[:, 0] < right)]
         if len(in_win) < 2:
-            continue  # pontos insuficientes para ajustar linha / not enough points to fit
+            continue
         m, b = fit_line(in_win)
         if m is None:
             continue
-        # x onde a linha cruza a borda inferior da imagem
-        # x where the line crosses the bottom edge of the image
         bx = m * img_h + b
-        if 0 <= bx <= img_w:  # dentro dos limites da imagem / within image bounds
+        if 0 <= bx <= img_w:
             rows.append((bx, m, b))
     return rows
 
 
 # ===========================================================================
-# Visualização de depuração / Debug visualisation
-# (de / from imageProc.drawGraphics — BSD-2)
+# Visualização de depuração  (de / from imageProc.drawGraphics — BSD-2)
 # ===========================================================================
 def draw_debug(bgr: np.ndarray, centers: np.ndarray,
                rows: list, img_w: int, img_h: int,
                held: bool = False, swap_remaining_s: float = 0.0) -> np.ndarray:
-    """
-    Desenha centros de plantas, linhas de fileira detectadas e linha central de referência.
-    Draw plant centers, detected row lines, and centre reference line.
-    When held=True the robot is holding a stale row angle (row-swap debounce
-    active). The detected line is drawn amber and a countdown is overlaid so
-    it is immediately visible in Foxglove.
-    """
     out = bgr.copy()
-    # Centros das plantas (magenta) / Plant centers (magenta)
     for (cx, cy) in centers:
         cv.circle(out, (cx, cy), 4, (255, 0, 255), -1)
-    # Linhas de fileira detectadas / Detected row lines
-    # Amber (0, 165, 255) when hold active, green (0, 255, 0) otherwise
+    # Amber when hold active, green otherwise
     line_colour = (0, 165, 255) if held else (0, 255, 0)
     for (bx, m, b) in rows:
-        x_top = int(m * 0 + b)   # x no topo da imagem / x at top of image
-        x_bot = int(bx)           # x na base da imagem / x at bottom of image
+        x_top = int(m * 0 + b)
+        x_bot = int(bx)
         cv.line(out, (x_top, 0), (x_bot, img_h), line_colour, 2)
-    # Linha central de referência (vermelha) — onde o robô deve estar
-    # Centre reference line (red) — where the robot should be
+    # Centre reference (red)
     cv.line(out, (img_w // 2, 0), (img_w // 2, img_h), (0, 0, 255), 1)
-    # Row-swap hold overlay
     if held and swap_remaining_s > 0.0:
         label = "HOLD %.1fs" % swap_remaining_s
         cv.putText(out, label, (8, 24),
@@ -348,8 +264,7 @@ class CropRowNode(Node):
         self.bridge = CvBridge()
 
         # -------------------------------------------------------------------
-        # Parâmetros — todos configuráveis via crop_row_params.yaml
-        # Parameters — all settable from crop_row_params.yaml
+        # Parâmetros
         # -------------------------------------------------------------------
         self.declare_parameter("image_topic", "/caatinga_vision/row_nav/image_raw")
         self.declare_parameter("debug_image_topic", "/caatinga_vision/row_nav/debug_image")
@@ -364,35 +279,26 @@ class CropRowNode(Node):
         self.declare_parameter("omega_scaler", 0.1)
         self.declare_parameter("max_omega", 0.4)
         self.declare_parameter("heartbeat_timeout_s", 2.0)
-        self.declare_parameter("use_direct_cmd_vel", True)  # kept for param-file compat; ignored — service is the gate
-        # Detector backend: "scanwin" (default, ExG + scan-window line fitting)
-        # or "tsm" (Triangle Scan Method, single central row). Selected at
-        # launch via `manage.py neo` (scanwin) vs `manage.py neo-tsm` (tsm).
+        self.declare_parameter("use_direct_cmd_vel", True)
         self.declare_parameter("detector", "scanwin")
-        # TSM tunables (only used when detector == "tsm"); see triangle_scan.py.
         self.declare_parameter("tsm_s", 0.2)
         self.declare_parameter("tsm_amin_frac", 0.2)
         self.declare_parameter("tsm_amax_frac", 0.7)
         self.declare_parameter("tsm_b_frac", 0.0)
         self.declare_parameter("tsm_c_frac", 1.0)
         self.declare_parameter("tsm_anchor_min_sum", 1.0)
-        self.declare_parameter("tsm_morph_kernel", 5)       # mask opening; 0 = off
-        # Anchor selection (multi-row disambiguation)
+        self.declare_parameter("tsm_morph_kernel", 5)
         self.declare_parameter("tsm_anchor_select", "argmax")
         self.declare_parameter("tsm_peak_rel_thresh", 0.6)
         self.declare_parameter("tsm_prior_lambda", 0.01)
         self.declare_parameter("tsm_prior_init_frac", 0.3)
         self.declare_parameter("tsm_weight_k", 0.5)
         self.declare_parameter("tsm_weight_side", "left")
-        self.declare_parameter("tsm_max_angle_deg", 15.0)  # near-vertical prior; 0 = off
-        # TSM temporal filter (engineering addition)
+        self.declare_parameter("tsm_max_angle_deg", 15.0)
         self.declare_parameter("tsm_filter_enable", True)
         self.declare_parameter("tsm_filter_alpha", 0.4)
         self.declare_parameter("tsm_filter_jump_gate_frac", 0.35)
         self.declare_parameter("tsm_filter_max_hold", 2)
-        # -------------------------------------------------------------------
-        # TSM row-swap hold (engineering addition)
-        # -------------------------------------------------------------------
         self.declare_parameter("tsm_swap_hold_s", 6.0)
         self.declare_parameter("tsm_swap_threshold_frac", 0.15)
 
@@ -409,12 +315,10 @@ class CropRowNode(Node):
         self.max_omega: float    = p("max_omega").value
         self.hb_timeout: float   = p("heartbeat_timeout_s").value
 
-        # Detector selection + TSM config
         self.detector: str = str(p("detector").value).lower()
         if self.detector not in ("scanwin", "tsm"):
             self.get_logger().warn(
-                "detector='%s' unrecognised — falling back to 'scanwin' / "
-                "detector não reconhecido, usando 'scanwin'" % self.detector)
+                "detector='%s' unrecognised — falling back to 'scanwin'" % self.detector)
             self.detector = "scanwin"
 
         if self.detector == "tsm":
@@ -442,33 +346,31 @@ class CropRowNode(Node):
                 jump_gate_frac=p("tsm_filter_jump_gate_frac").value,
                 max_hold=p("tsm_filter_max_hold").value,
             ))
-            # Row-swap hold state (TSM only)
+            # Row-swap hold state
             self._swap_hold_s: float = float(p("tsm_swap_hold_s").value)
             self._swap_thresh_px: float = p("tsm_swap_threshold_frac").value * self.img_w
             self._held_anchor_x: Optional[float] = None
+            self._held_bottom_x: Optional[float] = None  # paired with _held_anchor_x
             self._swap_deadline: Optional[rclpy.time.Time] = None
 
-        # Modelo de câmera para a matriz de interação do servo visual
-        # Camera model for the visual servoing interaction matrix
         self.camera = Camera(
             deltaz=p("camera_height_m").value,
             tilt_angle=np.deg2rad(p("camera_tilt_deg").value),
         )
 
         self.get_logger().info(
-            "crop_row_node iniciado / started | subscribing to %s | "
-            "cmd_vel gated by /row_follow/enable service"
-            % self.image_topic
+            "crop_row_node started | subscribing to %s | "
+            "cmd_vel gated by /row_follow/enable service" % self.image_topic
         )
 
         # -------------------------------------------------------------------
-        # Subscritor / Subscriber
+        # Subscriber
         # -------------------------------------------------------------------
         self.sub = self.create_subscription(
             Image, self.image_topic, self._on_image, 10)
 
         # -------------------------------------------------------------------
-        # Publicadores / Publishers
+        # Publishers
         # -------------------------------------------------------------------
         self.pub_offset = self.create_publisher(
             Float32, "/aoc/conditions/row_offset", 10)
@@ -480,14 +382,10 @@ class CropRowNode(Node):
             Image, self.debug_topic, 10)
         self.pub_cmd_vel = self.create_publisher(Twist, "/cmd_vel", 10)
 
-        # Enable/disable service — Limbic calls this to start/stop row following
         self._enabled = False
         self.srv_enable = self.create_service(
             SetBool, "/row_follow/enable", self._on_enable_service)
 
-        # -------------------------------------------------------------------
-        # Timer de heartbeat (5 Hz) — M10
-        # -------------------------------------------------------------------
         self._last_detection_time = None
         self._hb_timer = self.create_timer(0.2, self._publish_heartbeat)
 
@@ -495,15 +393,24 @@ class CropRowNode(Node):
     # TSM row-swap hold logic
     # -----------------------------------------------------------------------
     def _tsm_apply_swap_hold(self, tsm):
-        """Apply row-swap debounce to a TSMResult after TSMFilter.update()."""
+        """Apply row-swap debounce to a TSMResult after TSMFilter.update().
+
+        Holds the last accepted (left) row's anchor_x AND bottom_x together so
+        that _make_held_tsm reconstructs the correct frozen line geometry —
+        not a chimera of the old anchor and the new row's base point.
+
+        Returns (tsm_to_use, held, swap_remaining_s).
+        """
         if not tsm.valid:
             return tsm, False, 0.0
 
         new_ax = float(tsm.anchor_xy[0])
+        new_bx = float(tsm.bottom_x)
 
         # First valid detection — lock on unconditionally.
         if self._held_anchor_x is None:
             self._held_anchor_x = new_ax
+            self._held_bottom_x = new_bx
             self._swap_deadline = None
             return tsm, False, 0.0
 
@@ -511,8 +418,9 @@ class CropRowNode(Node):
         shift = abs(new_ax - self._held_anchor_x)
 
         if shift <= self._swap_thresh_px:
-            # Same row — update held anchor with EMA and reset any pending timer.
+            # Same row — EMA-track both endpoints and reset any pending timer.
             self._held_anchor_x = 0.7 * self._held_anchor_x + 0.3 * new_ax
+            self._held_bottom_x = 0.7 * self._held_bottom_x + 0.3 * new_bx
             self._swap_deadline = None
             return tsm, False, 0.0
 
@@ -528,21 +436,25 @@ class CropRowNode(Node):
         remaining_ns = (self._swap_deadline - now).nanoseconds
         if remaining_ns > 0:
             remaining_s = remaining_ns * 1e-9
-            held_tsm = self._make_held_tsm(tsm)
-            return held_tsm, True, remaining_s
+            return self._make_held_tsm(), True, remaining_s
 
         # Timer expired — accept the new row.
         self.get_logger().info(
             "TSM row-swap hold expired: accepting new row at anchor_x=%.0f" % new_ax)
         self._held_anchor_x = new_ax
+        self._held_bottom_x = new_bx
         self._swap_deadline = None
         return tsm, False, 0.0
 
-    def _make_held_tsm(self, reference_tsm):
-        """Return a TSMResult that matches the held anchor_x."""
+    def _make_held_tsm(self):
+        """Reconstruct a TSMResult from the held anchor + bottom endpoint pair.
+
+        Both points belong to the same (last accepted) row, so slope and
+        intercept correctly describe that row's frozen geometry.
+        """
         from sowbot_row_follow.triangle_scan import TSMResult
         ax = self._held_anchor_x
-        px = reference_tsm.bottom_x
+        px = self._held_bottom_x
         denom = float(self.img_h - 1) if self.img_h > 1 else 1.0
         m = (px - ax) / denom
         return TSMResult(
@@ -554,14 +466,20 @@ class CropRowNode(Node):
             valid=True,
         )
 
+    def _reset_swap_hold(self):
+        """Clear all row-swap hold state (called on disable and re-enable)."""
+        self._held_anchor_x = None
+        self._held_bottom_x = None
+        self._swap_deadline = None
+
     # -----------------------------------------------------------------------
-    # Callback de imagem / Image callback
+    # Image callback
     # -----------------------------------------------------------------------
     def _on_image(self, msg: Image) -> None:
         try:
             bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except CvBridgeError as e:
-            self.get_logger().error("Falha no CV bridge: %s" % str(e))
+            self.get_logger().error("CV bridge error: %s" % str(e))
             return
 
         h, w = bgr.shape[:2]
@@ -631,10 +549,9 @@ class CropRowNode(Node):
             self.pub_cmd_vel.publish(twist)
 
         self.get_logger().debug(
-            "fileiras=%d offset=%.3f rumo=%.1fgraus omega=%.3f hold=%s | "
             "rows=%d offset=%.3f heading=%.1fdeg omega=%.3f hold=%s"
-            % (len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega, held,
-               len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega, held)
+            % (len(detected_rows), norm_offset,
+               math.degrees(heading_error_rad), omega, held)
         )
 
     # -----------------------------------------------------------------------
@@ -646,15 +563,13 @@ class CropRowNode(Node):
         if not self._enabled:
             self._publish_zero_cmd_vel()
             if self.detector == "tsm":
-                self._held_anchor_x = None
-                self._swap_deadline = None
+                self._reset_swap_hold()
         response.success = True
         response.message = "enabled" if self._enabled else "disabled"
         self.get_logger().info("row_follow/enable → %s" % response.message)
         return response
 
     def _publish_zero_cmd_vel(self) -> None:
-        """Publish one zero-velocity Twist to guarantee the robot stops."""
         self.pub_cmd_vel.publish(Twist())
 
     # -----------------------------------------------------------------------
@@ -669,9 +584,8 @@ class CropRowNode(Node):
             alive = elapsed < self.hb_timeout
         if not alive and self._last_detection_time is not None:
             self.get_logger().warn(
-                "crop_row_node: sem detecção de fileira — heartbeat INATIVO. "
-                "No row detection — heartbeat DEAD. "
-                "Sistema Límbico deve entrar em PERCEPTION_DEGRADED (M10).",
+                "crop_row_node: no row detection — heartbeat DEAD. "
+                "Limbic System should enter PERCEPTION_DEGRADED (M10).",
                 throttle_duration_sec=5.0,
             )
         hb = Bool()
