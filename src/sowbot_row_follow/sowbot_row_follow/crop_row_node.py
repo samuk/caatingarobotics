@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 # Copyright 2022 Agricultural-Robotics-Bonn
 # Copyright 2026 Agroecology Lab Ltd
@@ -30,174 +31,665 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-# crop_row_nav.launch.py
-# ======================
-# Derived from:
+# crop_row_node.py
+# ================
+# Derivado de / Derived from:
 #   visual-multi-crop-row-navigation
 #   https://github.com/Agricultural-Robotics-Bonn/visual-multi-crop-row-navigation
-#   Authors: Alireza Ahmadi, Michael Halstead, Chris McCool (Agricultural-Robotics-Bonn)
-#   ROS2 port: Agroecology Lab CIC
-#   Reference: Ahmadi et al., "Towards Autonomous Crop-Agnostic Visual Navigation
+#   Autores / Authors: Alireza Ahmadi, Michael Halstead, Chris McCool (Agricultural-Robotics-Bonn)
+#   Porta ROS2 / ROS2 port: Agroecology Lab Ltd
+#   Referência / Reference: Ahmadi et al., "Towards Autonomous Crop-Agnostic Visual Navigation
 #              in Arable Fields", arXiv:2109.11936, 2021.
 #              Ahmadi et al., ICRA 2020.
 #
-# Adapted for caatinga_vision / Sowbot by Agroecology Lab Ltd
+# Adaptado para o projeto Sowbot por Agroecology Lab Ltd.
+# Adapted for the Sowbot project by Agroecology Lab Ltd.
 #
-# Launches the USB camera (usb_cam_node_exe), crop_row_node, and
-# web_video_server together in one launch session / DDS graph:
-#   - usb_cam publishes /devkit/camera/image_raw
-#   - crop_row_node subscribes to it, publishes /caatinga_vision/row_nav/debug_image
-#   - web_video_server serves ALL image topics over HTTP for browser viewing
+# Modificações / Modifications:
+#   Reduzido para câmera RGB única, monocular, seguimento de fileira apenas para frente.
+#   Stripped to single RGB camera, monocular, forward row-following only.
+#   Removido / Removed: profundidade, estéreo, correspondência de características,
+#     modos de navegação, troca de fileiras, câmera dupla.
+#     (depth, stereo, feature matching, navigation modes, row switching, dual-camera)
+#   Preservado verbatim ou quase verbatim / Preserved verbatim or near-verbatim:
+#     - Índice ExG + limiar Otsu         (imageProc.getExgMask)
+#     - Extração de centros de contorno  (imageProc.processRGBImage)
+#     - Ajuste de linha por janela       (imageProc.findLinesInImage)
+#     - Transformação câmera→imagem      (imageProc.cameraToImage)
+#     - Matriz de interação visual       (controller.visualServoingCtl)
+#     - Modelo de câmera                 (camera.Camera)
 #
-# Why usb_cam is launched here:
-#   On loopback-only CycloneDDS a separately-started process can land in a
-#   different discovery context, so crop_row_node saw zero publishers and the
-#   feed never appeared. Launching everything from one launch file guarantees
-#   they share the same session.
+# Subscreve / Subscribes:
+#   /caatinga_vision/row_nav/image_raw  (sensor_msgs/Image) — da / from camera_source_node
 #
-# Why web_video_server:
-#   Serves the stream over HTTP (default port 8080), so the feed is viewable in
-#   any browser with no X-forwarding and no DDS config on the viewer side.
-#   Browse all topics at  http://localhost:8080
-#   Direct stream:        http://localhost:8080/stream?topic=/caatinga_vision/row_nav/debug_image
+# Publica / Publishes:
+#   /aoc/conditions/row_offset        (std_msgs/Float32)  deslocamento lateral [-1,1] / lateral offset
+#   /aoc/conditions/row_heading_error (std_msgs/Float32)  erro de rumo em radianos / heading error in radians
+#   /aoc/heartbeat/neo_vision         (std_msgs/Bool)     True enquanto fileiras detectadas (M10)
+#   /caatinga_vision/row_nav/debug_image (sensor_msgs/Image)  frame anotado / annotated frame (Foxglove)
 #
-# QoS note:
-#   crop_row_node subscribes to the image topic RELIABLE. usb_cam defaults to
-#   BEST_EFFORT, which will NOT connect to a RELIABLE subscriber, so we force
-#   usb_cam to publish RELIABLE here via qos_overrides.
-#
-# Topics published:
-#   /devkit/camera/image_raw            Raw camera frames (from usb_cam)
-#   /caatinga_vision/row_nav/debug_image  Annotated frames
-#   /aoc/conditions/row_offset          Normalised lateral offset [-1,1]
-#   /aoc/conditions/row_heading_error   Heading error in radians
-#   /aoc/heartbeat/neo_vision           Perception heartbeat for M10
-#   /cmd_vel                            Always published; gated by /row_follow/enable service
-#
-# Usage:
-#   ros2 launch sowbot_row_follow crop_row_nav.launch.py
-#   ros2 launch sowbot_row_follow crop_row_nav.launch.py video_device:=/dev/video2
-#   ros2 launch sowbot_row_follow crop_row_nav.launch.py use_camera:=false        # subscribe only
-#   ros2 launch sowbot_row_follow crop_row_nav.launch.py use_web_video:=false     # no HTTP stream
-#   ros2 launch sowbot_row_follow crop_row_nav.launch.py web_video_port:=8081
+# Publica sempre / Always publishes (gated by /row_follow/enable service):
+#   /cmd_vel  (geometry_msgs/Twist)
 
-from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo
-from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
+from __future__ import division, print_function
+import math
+from typing import Optional
+import cv2 as cv
+import numpy as np
+import rclpy
+import rclpy.duration
+from cv_bridge import CvBridge, CvBridgeError
+from geometry_msgs.msg import Twist
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from std_msgs.msg import Bool, Float32
+from std_srvs.srv import SetBool
+# TSM detector (optional backend). Imported at module load, not per-frame.
+from sowbot_row_follow.triangle_scan import detect_central_row
 
 
-def generate_launch_description():
-    # Base params from file — hardware-specific values live here, not in this launch file.
-    # Edit caatinga_vision/config/crop_row_params.yaml to set camera_height_m, camera_tilt_deg etc.
-    params_file = PathJoinSubstitution(
-        [FindPackageShare("sowbot_row_follow"), "config", "crop_row_params.yaml"]
-    )
+# ===========================================================================
+# Modelo de câmera / Camera model  (de / from camera.py — BSD-2)
+# Apenas os campos usados pela matriz de interação do controlador.
+# Only the fields used by the controller interaction matrix.
+# ===========================================================================
+class Camera:
+    def __init__(self, f=1, deltaz=1.2, deltay=0, scale=1,
+                 tilt_angle=np.deg2rad(-80), pixel_size=0.96,
+                 cx=0, cy=0, ar=1):
+        self.f = f
+        self.deltaz = deltaz      # altura acima do solo (m) / height above ground (m)
+        self.deltay = deltay      # deslocamento frontal da câmera / forward camera offset from wheel axis
+        self.scale = scale
+        self.tilt_angle = tilt_angle  # ângulo de inclinação (rad) / tilt angle (rad)
+        self.pixel_size = pixel_size
+        self.cx = cx
+        self.cy = cy
+        self.ar = ar
 
-    image_topic = LaunchConfiguration("image_topic")
-    web_video_port = LaunchConfiguration("web_video_port")
 
-    return LaunchDescription([
+# ===========================================================================
+# Controlador de servo visual / Visual servoing controller  (de / from controller.py — BSD-2)
+# Matriz de interação de Cherubini & Chaumette, preservada exatamente.
+# Cherubini & Chaumette interaction matrix, preserved exactly.
+# ===========================================================================
+def wrap_to_pi(theta: float) -> float:
+    # Normaliza ângulo para [-pi, pi] / Wrap angle to [-pi, pi]
+    while theta < -math.pi:
+        theta += 2 * math.pi
+    while theta > math.pi:
+        theta -= 2 * math.pi
+    return theta
 
-        # ------------------------------------------------------------------
-        # Launch arguments
-        # ------------------------------------------------------------------
-        DeclareLaunchArgument("camera_index", default_value="0"),
-        DeclareLaunchArgument(
-            "image_topic", default_value="/devkit/camera/image_raw",
-            description="Image topic crop_row_node subscribes to and usb_cam publishes.",
-        ),
-        DeclareLaunchArgument(
-            "video_device", default_value="/dev/video0",
-            description="V4L2 device node for the USB camera.",
-        ),
-        DeclareLaunchArgument(
-            "use_camera", default_value="true",
-            description="If true, launch usb_cam here. Set false for sim / external / remote camera.",
-        ),
-        DeclareLaunchArgument(
-            "use_web_video", default_value="true",
-            description="If true, launch web_video_server to serve image topics over HTTP.",
-        ),
-        DeclareLaunchArgument(
-            "web_video_port", default_value="8080",
-            description="HTTP port for web_video_server.",
-        ),
-        DeclareLaunchArgument(
-            "detector", default_value="scanwin",
-            description="Row-detection backend: 'scanwin' (ExG scan-window, "
-                        "default) or 'tsm' (Triangle Scan Method).",
-        ),
 
-        # ------------------------------------------------------------------
-        # USB camera — publishes the image topic crop_row_node consumes.
-        # Remapped so usb_cam's default /image_raw becomes image_topic.
-        # QoS forced RELIABLE to match crop_row_node's subscription.
-        # ------------------------------------------------------------------
-        Node(
-            package="usb_cam",
-            executable="usb_cam_node_exe",
-            name="usb_cam",
-            output="screen",
-            condition=IfCondition(LaunchConfiguration("use_camera")),
-            parameters=[{
-                "video_device": LaunchConfiguration("video_device"),
-                "image_width": 640,
-                "image_height": 480,
-                "pixel_format": "yuyv",
-                "framerate": 30.0,
-                "camera_name": "default_cam",
-                "qos_overrides./devkit/camera/image_raw.publisher.reliability": "reliable",
-            }],
-            remappings=[
-                ("/image_raw", image_topic),
-            ],
-        ),
-
-        # ------------------------------------------------------------------
-        # Crop-row perception / control node
-        # ------------------------------------------------------------------
-        Node(
-            package="sowbot_row_follow",
-            executable="crop_row_node",
-            name="crop_row_node",
-            output="screen",
-            parameters=[
-                params_file,
-                {
-                    "camera_index": LaunchConfiguration("camera_index"),
-                    "image_topic":  image_topic,
-                    "detector":     LaunchConfiguration("detector"),
-                },
-            ],
-        ),
-
-        # ------------------------------------------------------------------
-        # web_video_server — HTTP stream of all image topics for browser viewing
-        # ------------------------------------------------------------------
-        Node(
-            package="web_video_server",
-            executable="web_video_server",
-            name="web_video_server",
-            output="screen",
-            condition=IfCondition(LaunchConfiguration("use_web_video")),
-            parameters=[{
-                "port": web_video_port,
-                "address": "0.0.0.0",
-            }],
-        ),
-
-        # Print the viewing URLs prominently in the launch terminal.
-        LogInfo(condition=IfCondition(LaunchConfiguration("use_web_video")),
-                msg=["\n",
-                     "============================================================\n",
-                     "  Camera stream live in your browser:\n",
-                     "    All topics : http://localhost:", web_video_port, "\n",
-                     "    Debug view : http://localhost:", web_video_port,
-                     "/stream?topic=/caatinga_vision/row_nav/debug_image\n",
-                     "    Raw camera : http://localhost:", web_video_port,
-                     "/stream?topic=/devkit/camera/image_raw\n",
-                     "============================================================"]),
+def visual_servoing_ctl(camera: Camera,
+                        desired_state: np.ndarray,
+                        actual_state: np.ndarray,
+                        v_des: float) -> float:
+    """
+    Calcula a correção de velocidade angular (rad/s).
+    Compute angular velocity correction (rad/s).
+    desired_state: [x_desejado, y_desejado, theta_desejado]  (características no frame da imagem)
+                   [x_desired,  y_desired,  theta_desired]   (image-frame features)
+    actual_state:  [x_atual,    y_atual,    theta_atual]
+                   [x_actual,   y_actual,   theta_actual]
+    v_des: velocidade frontal desejada (m/s) / desired forward speed (m/s)
+    Preservado de / Preserved from controller.visualServoingCtl (BSD-2).
+    """
+    x = actual_state[0]
+    y = actual_state[1]
+    theta = actual_state[2]
+    # Ganhos do controlador / Controller gains
+    lambda_x_1 = 10
+    lambda_w_1 = 3000
+    lambdavec = np.array([lambda_x_1, lambda_w_1])
+    # Tipo 0 = seguimento de fileira / Type 0 = row following (not column)
+    controller_type = 0
+    angle = camera.tilt_angle
+    delta_z = camera.deltaz
+    # Matriz de interação (Cherubini & Chaumette)
+    # Relaciona variáveis de controle [v, w] às mudanças de características [x, y, theta]
+    # Relates control variables [v, w] to feature changes [x, y, theta]
+    IntMat = np.array([
+        [(-np.sin(angle) - y * np.cos(angle)) / delta_z, 0,
+         x * (np.sin(angle) + y * np.cos(angle)) / delta_z,
+         x * y, -1 - x**2, y],
+        [0, -(np.sin(angle) + y * np.cos(angle)) / delta_z,
+         y * (np.sin(angle) + y * np.cos(angle)) / delta_z,
+         1 + y**2, -x * y, -x],
+        [np.cos(angle) * np.cos(theta)**2 / delta_z,
+         np.cos(angle) * np.cos(theta) * np.sin(theta) / delta_z,
+         -(np.cos(angle) * np.cos(theta) * (y * np.sin(theta) + x * np.cos(theta))) / delta_z,
+         -(y * np.sin(theta) + x * np.cos(theta)) * np.cos(theta),
+         -(y * np.sin(theta) + x * np.cos(theta)) * np.sin(theta), -1]
     ])
+    # Transformação do frame do robô para o frame da câmera
+    # Transformation from robot frame to camera frame
+    delta_y = camera.deltay
+    TransfMat = np.array([
+        [0,               -delta_y],
+        [-np.sin(angle),   0],
+        [np.cos(angle),    0],
+        [0,                0],
+        [0,               -np.cos(angle)],
+        [0,               -np.sin(angle)],
+    ])
+    Trans_vel = TransfMat[:, 0]  # componente linear / linear component
+    Trans_ang = TransfMat[:, 1]  # componente angular / angular component
+    # Jacobiano: relaciona controles do robô às mudanças de características
+    # Jacobian: relates robot controls to feature changes
+    Jac = np.array([IntMat[controller_type, :], IntMat[2, :]])
+    Jac_vel = np.matmul(Jac, Trans_vel)
+    Jac_ang = np.matmul(Jac, Trans_ang)
+    Jac_ang_pi = np.linalg.pinv([Jac_ang])  # pseudoinversa / pseudoinverse
+    # Erro entre estado atual e desejado / Error between actual and desired state
+    trans_delta = actual_state[controller_type] - desired_state[controller_type]
+    ang_delta = actual_state[2] - desired_state[2]
+    delta = np.array([trans_delta, wrap_to_pi(ang_delta)])
+    # Lei de controle de realimentação / Feedback control law
+    temp = lambdavec * delta
+    ang_fb = np.matmul(-Jac_ang_pi.T, (temp + Jac_vel * v_des))
+    return float(np.squeeze(ang_fb))
+
+
+# ===========================================================================
+# Índice de vegetação ExG + extração de contornos
+# ExG vegetation index + contour extraction  (de / from imageProc.py — BSD-2)
+# ===========================================================================
+def compute_exg_mask(bgr_img: np.ndarray):
+    """
+    Índice de Verde Excedente → máscara binária de vegetação.
+    Excess Green Index → binary vegetation mask.
+    De / From imageProc.getExgMask (BSD-2).
+    """
+    # Converte para int32 para permitir valores negativos no cálculo ExG
+    # Cast to int32 to allow negative values in ExG calculation
+    img = bgr_img.astype("int32")
+    b, g, r = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+    # ExG = 2G - R - B  (realça vegetação verde / highlights green vegetation)
+    exg = 2 * g - r - b
+    exg[exg < 0] = 0  # descarta valores negativos / discard negative values
+    exg = exg.astype("uint8")
+    # Suavização gaussiana antes da limiarização para reduzir ruído
+    # Gaussian blur before thresholding to reduce noise
+    blur = cv.GaussianBlur(exg, (5, 5), 0)
+    # Limiarização de Otsu: encontra automaticamente o melhor limiar
+    # Otsu thresholding: automatically finds the best threshold
+    _, mask = cv.threshold(blur, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+    # Dilatação para conectar regiões de plantas próximas
+    # Dilation to connect nearby plant regions
+    kernel = np.ones((10, 10), np.uint8)
+    mask = cv.dilate(mask, kernel, iterations=1)
+    return mask
+
+
+def get_plant_centers(mask: np.ndarray, min_area: float) -> np.ndarray:
+    """
+    Centros de contorno da máscara binária. Retorna array (N,2) de (x,y).
+    Contour centers from binary mask. Returns (N,2) array of (x,y).
+    De / From imageProc.processRGBImage (BSD-2).
+    """
+    contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    centers = []
+    for c in contours:
+        # Filtra contornos pequenos (ruído de solo, pedras, etc.)
+        # Filter small contours (soil noise, stones, etc.)
+        if cv.contourArea(c) >= min_area:
+            M = cv.moments(c)
+            if M["m00"] > 0:
+                # Centro de massa do contorno / Contour centroid
+                centers.append((int(M["m10"] / M["m00"]),
+                                 int(M["m01"] / M["m00"])))
+    return np.array(centers) if centers else np.empty((0, 2), dtype=int)
+
+
+# ===========================================================================
+# Ajuste de linha por janela de varredura
+# Scan-window line fitting  (de / from imageProc.findLinesInImage — BSD-2)
+# ===========================================================================
+def fit_line(points_xy: np.ndarray):
+    """
+    Ajusta x = m*y + b aos centros das plantas.
+    Fit x = m*y + b to plant centers.
+    De / From helpers geométricos do imageProc (BSD-2).
+    Usa y como variável independente pois as fileiras são aproximadamente verticais
+    na imagem — ajuste padrão x=f(y) é mais estável que y=f(x) neste caso.
+    Uses y as the independent variable because rows run approximately vertical
+    in the image — fitting x=f(y) is more stable than y=f(x) here.
+    """
+    if len(points_xy) < 2:
+        return None, None
+    y = points_xy[:, 1].astype(float)
+    x = points_xy[:, 0].astype(float)
+    # Evita ajuste degenerado quando todos os pontos têm a mesma altura
+    # Avoid degenerate fit when all points share the same row
+    if np.std(y) < 1.0:
+        return None, None
+    m, b = np.polyfit(y, x, 1)  # inclinação e intercepto / slope and intercept
+    return m, b
+
+
+def detect_crop_rows(centers: np.ndarray,
+                     img_w: int, img_h: int,
+                     n_windows: int, win_w: int) -> list:
+    """
+    Divide a imagem em n_windows colunas verticais e ajusta uma linha por coluna.
+    Divide the image into n_windows vertical columns and fit a line per column.
+    De / From imageProc.findLinesInImage (BSD-2).
+    Retorna / Returns: lista de (bottom_x, slope, intercept) por fileira detectada.
+                       list of (bottom_x, slope, intercept) per detected row.
+    """
+    if len(centers) == 0:
+        return []
+    # Largura de cada passo de varredura / Width of each scan step
+    step = img_w / n_windows
+    rows = []
+    for i in range(n_windows):
+        # Limites da janela atual / Current window bounds
+        left = i * step
+        right = left + win_w
+        # Pontos dentro desta janela / Points inside this window
+        in_win = centers[(centers[:, 0] >= left) & (centers[:, 0] < right)]
+        if len(in_win) < 2:
+            continue  # pontos insuficientes para ajustar linha / not enough points to fit
+        m, b = fit_line(in_win)
+        if m is None:
+            continue
+        # x onde a linha cruza a borda inferior da imagem
+        # x where the line crosses the bottom edge of the image
+        bx = m * img_h + b
+        if 0 <= bx <= img_w:  # dentro dos limites da imagem / within image bounds
+            rows.append((bx, m, b))
+    return rows
+
+
+# ===========================================================================
+# Visualização de depuração / Debug visualisation
+# (de / from imageProc.drawGraphics — BSD-2)
+# ===========================================================================
+def draw_debug(bgr: np.ndarray, centers: np.ndarray,
+               rows: list, img_w: int, img_h: int,
+               held: bool = False, swap_remaining_s: float = 0.0) -> np.ndarray:
+    """
+    Desenha centros de plantas, linhas de fileira detectadas e linha central de referência.
+    Draw plant centers, detected row lines, and centre reference line.
+    When held=True the robot is holding a stale row angle (row-swap debounce
+    active). The detected line is drawn amber and a countdown is overlaid so
+    it is immediately visible in Foxglove.
+    """
+    out = bgr.copy()
+    # Centros das plantas (magenta) / Plant centers (magenta)
+    for (cx, cy) in centers:
+        cv.circle(out, (cx, cy), 4, (255, 0, 255), -1)
+    # Linhas de fileira detectadas / Detected row lines
+    # Amber (0, 165, 255) when hold active, green (0, 255, 0) otherwise
+    line_colour = (0, 165, 255) if held else (0, 255, 0)
+    for (bx, m, b) in rows:
+        x_top = int(m * 0 + b)   # x no topo da imagem / x at top of image
+        x_bot = int(bx)           # x na base da imagem / x at bottom of image
+        cv.line(out, (x_top, 0), (x_bot, img_h), line_colour, 2)
+    # Linha central de referência (vermelha) — onde o robô deve estar
+    # Centre reference line (red) — where the robot should be
+    cv.line(out, (img_w // 2, 0), (img_w // 2, img_h), (0, 0, 255), 1)
+    # Row-swap hold overlay
+    if held and swap_remaining_s > 0.0:
+        label = "HOLD %.1fs" % swap_remaining_s
+        cv.putText(out, label, (8, 24),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2, cv.LINE_AA)
+    return out
+
+
+# ===========================================================================
+# Nó ROS 2 / ROS 2 Node
+# ===========================================================================
+class CropRowNode(Node):
+    def __init__(self):
+        super().__init__("crop_row_node")
+        self.bridge = CvBridge()
+
+        # -------------------------------------------------------------------
+        # Parâmetros — todos configuráveis via crop_row_params.yaml
+        # Parameters — all settable from crop_row_params.yaml
+        # -------------------------------------------------------------------
+        self.declare_parameter("image_topic", "/caatinga_vision/row_nav/image_raw")
+        self.declare_parameter("debug_image_topic", "/caatinga_vision/row_nav/debug_image")
+        self.declare_parameter("image_width", 640)
+        self.declare_parameter("image_height", 480)
+        self.declare_parameter("n_scan_windows", 8)
+        self.declare_parameter("window_width", 80)
+        self.declare_parameter("min_contour_area", 10.0)
+        self.declare_parameter("camera_height_m", 1.2)
+        self.declare_parameter("camera_tilt_deg", -80.0)
+        self.declare_parameter("linear_vel", 0.15)
+        self.declare_parameter("omega_scaler", 0.1)
+        self.declare_parameter("max_omega", 0.4)
+        self.declare_parameter("heartbeat_timeout_s", 2.0)
+        self.declare_parameter("use_direct_cmd_vel", True)  # kept for param-file compat; ignored — service is the gate
+        # Detector backend: "scanwin" (default, ExG + scan-window line fitting)
+        # or "tsm" (Triangle Scan Method, single central row). Selected at
+        # launch via `manage.py neo` (scanwin) vs `manage.py neo-tsm` (tsm).
+        self.declare_parameter("detector", "scanwin")
+        # TSM tunables (only used when detector == "tsm"); see triangle_scan.py.
+        self.declare_parameter("tsm_s", 0.2)
+        self.declare_parameter("tsm_amin_frac", 0.2)
+        self.declare_parameter("tsm_amax_frac", 0.7)
+        self.declare_parameter("tsm_b_frac", 0.0)
+        self.declare_parameter("tsm_c_frac", 1.0)
+        self.declare_parameter("tsm_anchor_min_sum", 1.0)
+        self.declare_parameter("tsm_morph_kernel", 5)       # mask opening; 0 = off
+        # Anchor selection (multi-row disambiguation)
+        self.declare_parameter("tsm_anchor_select", "argmax")
+        self.declare_parameter("tsm_peak_rel_thresh", 0.6)
+        self.declare_parameter("tsm_prior_lambda", 0.01)
+        self.declare_parameter("tsm_prior_init_frac", 0.3)
+        self.declare_parameter("tsm_weight_k", 0.5)
+        self.declare_parameter("tsm_weight_side", "left")
+        self.declare_parameter("tsm_max_angle_deg", 15.0)  # near-vertical prior; 0 = off
+        # TSM temporal filter (engineering addition)
+        self.declare_parameter("tsm_filter_enable", True)
+        self.declare_parameter("tsm_filter_alpha", 0.4)
+        self.declare_parameter("tsm_filter_jump_gate_frac", 0.35)
+        self.declare_parameter("tsm_filter_max_hold", 2)
+        # -------------------------------------------------------------------
+        # TSM row-swap hold (engineering addition)
+        # -------------------------------------------------------------------
+        self.declare_parameter("tsm_swap_hold_s", 6.0)
+        self.declare_parameter("tsm_swap_threshold_frac", 0.15)
+
+        p = self.get_parameter
+        self.image_topic: str    = p("image_topic").value
+        self.debug_topic: str    = p("debug_image_topic").value
+        self.img_w: int          = p("image_width").value
+        self.img_h: int          = p("image_height").value
+        self.n_windows: int      = p("n_scan_windows").value
+        self.win_w: int          = p("window_width").value
+        self.min_area: float     = p("min_contour_area").value
+        self.linear_vel: float   = p("linear_vel").value
+        self.omega_scaler: float = p("omega_scaler").value
+        self.max_omega: float    = p("max_omega").value
+        self.hb_timeout: float   = p("heartbeat_timeout_s").value
+
+        # Detector selection + TSM config
+        self.detector: str = str(p("detector").value).lower()
+        if self.detector not in ("scanwin", "tsm"):
+            self.get_logger().warn(
+                "detector='%s' unrecognised — falling back to 'scanwin' / "
+                "detector não reconhecido, usando 'scanwin'" % self.detector)
+            self.detector = "scanwin"
+
+        if self.detector == "tsm":
+            from sowbot_row_follow.triangle_scan import (
+                TSMParams, TSMFilterParams, TSMFilter)
+            self.tsm_params = TSMParams(
+                s=p("tsm_s").value,
+                amin_frac=p("tsm_amin_frac").value,
+                amax_frac=p("tsm_amax_frac").value,
+                b_frac=p("tsm_b_frac").value,
+                c_frac=p("tsm_c_frac").value,
+                anchor_min_sum=p("tsm_anchor_min_sum").value,
+                morph_kernel=p("tsm_morph_kernel").value,
+                anchor_select=str(p("tsm_anchor_select").value),
+                peak_rel_thresh=p("tsm_peak_rel_thresh").value,
+                prior_lambda=p("tsm_prior_lambda").value,
+                prior_init_frac=p("tsm_prior_init_frac").value,
+                weight_k=p("tsm_weight_k").value,
+                weight_side=str(p("tsm_weight_side").value),
+                max_angle_deg=p("tsm_max_angle_deg").value,
+            )
+            self.tsm_filter = TSMFilter(TSMFilterParams(
+                enable=p("tsm_filter_enable").value,
+                alpha=p("tsm_filter_alpha").value,
+                jump_gate_frac=p("tsm_filter_jump_gate_frac").value,
+                max_hold=p("tsm_filter_max_hold").value,
+            ))
+            # Row-swap hold state (TSM only)
+            self._swap_hold_s: float = float(p("tsm_swap_hold_s").value)
+            self._swap_thresh_px: float = p("tsm_swap_threshold_frac").value * self.img_w
+            self._held_anchor_x: Optional[float] = None
+            self._swap_deadline: Optional[rclpy.time.Time] = None
+
+        # Modelo de câmera para a matriz de interação do servo visual
+        # Camera model for the visual servoing interaction matrix
+        self.camera = Camera(
+            deltaz=p("camera_height_m").value,
+            tilt_angle=np.deg2rad(p("camera_tilt_deg").value),
+        )
+
+        self.get_logger().info(
+            "crop_row_node iniciado / started | subscribing to %s | "
+            "cmd_vel gated by /row_follow/enable service"
+            % self.image_topic
+        )
+
+        # -------------------------------------------------------------------
+        # Subscritor / Subscriber
+        # -------------------------------------------------------------------
+        self.sub = self.create_subscription(
+            Image, self.image_topic, self._on_image, 10)
+
+        # -------------------------------------------------------------------
+        # Publicadores / Publishers
+        # -------------------------------------------------------------------
+        self.pub_offset = self.create_publisher(
+            Float32, "/aoc/conditions/row_offset", 10)
+        self.pub_heading = self.create_publisher(
+            Float32, "/aoc/conditions/row_heading_error", 10)
+        self.pub_heartbeat = self.create_publisher(
+            Bool, "/aoc/heartbeat/neo_vision", 10)
+        self.pub_debug = self.create_publisher(
+            Image, self.debug_topic, 10)
+        self.pub_cmd_vel = self.create_publisher(Twist, "/cmd_vel", 10)
+
+        # Enable/disable service — Limbic calls this to start/stop row following
+        self._enabled = False
+        self.srv_enable = self.create_service(
+            SetBool, "/row_follow/enable", self._on_enable_service)
+
+        # -------------------------------------------------------------------
+        # Timer de heartbeat (5 Hz) — M10
+        # -------------------------------------------------------------------
+        self._last_detection_time = None
+        self._hb_timer = self.create_timer(0.2, self._publish_heartbeat)
+
+    # -----------------------------------------------------------------------
+    # TSM row-swap hold logic
+    # -----------------------------------------------------------------------
+    def _tsm_apply_swap_hold(self, tsm):
+        """Apply row-swap debounce to a TSMResult after TSMFilter.update()."""
+        if not tsm.valid:
+            return tsm, False, 0.0
+
+        new_ax = float(tsm.anchor_xy[0])
+
+        # First valid detection — lock on unconditionally.
+        if self._held_anchor_x is None:
+            self._held_anchor_x = new_ax
+            self._swap_deadline = None
+            return tsm, False, 0.0
+
+        now = self.get_clock().now()
+        shift = abs(new_ax - self._held_anchor_x)
+
+        if shift <= self._swap_thresh_px:
+            # Same row — update held anchor with EMA and reset any pending timer.
+            self._held_anchor_x = 0.7 * self._held_anchor_x + 0.3 * new_ax
+            self._swap_deadline = None
+            return tsm, False, 0.0
+
+        # Anchor has jumped — possible row switch.
+        if self._swap_deadline is None:
+            self._swap_deadline = now + rclpy.duration.Duration(
+                seconds=self._swap_hold_s)
+            self.get_logger().info(
+                "TSM row-swap hold armed: anchor shifted %.0fpx (threshold %.0fpx), "
+                "holding current angle for %.1fs"
+                % (shift, self._swap_thresh_px, self._swap_hold_s))
+
+        remaining_ns = (self._swap_deadline - now).nanoseconds
+        if remaining_ns > 0:
+            remaining_s = remaining_ns * 1e-9
+            held_tsm = self._make_held_tsm(tsm)
+            return held_tsm, True, remaining_s
+
+        # Timer expired — accept the new row.
+        self.get_logger().info(
+            "TSM row-swap hold expired: accepting new row at anchor_x=%.0f" % new_ax)
+        self._held_anchor_x = new_ax
+        self._swap_deadline = None
+        return tsm, False, 0.0
+
+    def _make_held_tsm(self, reference_tsm):
+        """Return a TSMResult that matches the held anchor_x."""
+        from sowbot_row_follow.triangle_scan import TSMResult
+        ax = self._held_anchor_x
+        px = reference_tsm.bottom_x
+        denom = float(self.img_h - 1) if self.img_h > 1 else 1.0
+        m = (px - ax) / denom
+        return TSMResult(
+            anchor_xy=(int(round(ax)), 0),
+            base_xy=(int(round(px)), self.img_h - 1),
+            slope=m,
+            intercept=float(ax),
+            bottom_x=float(px),
+            valid=True,
+        )
+
+    # -----------------------------------------------------------------------
+    # Callback de imagem / Image callback
+    # -----------------------------------------------------------------------
+    def _on_image(self, msg: Image) -> None:
+        try:
+            bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except CvBridgeError as e:
+            self.get_logger().error("Falha no CV bridge: %s" % str(e))
+            return
+
+        h, w = bgr.shape[:2]
+        if w != self.img_w or h != self.img_h:
+            bgr = cv.resize(bgr, (self.img_w, self.img_h))
+
+        mask = compute_exg_mask(bgr)
+        centers = get_plant_centers(mask, self.min_area)
+
+        held = False
+        swap_remaining_s = 0.0
+
+        if self.detector == "tsm":
+            tsm = detect_central_row(mask, self.tsm_params,
+                                     prev_anchor=self.tsm_filter.prev_anchor)
+            tsm = self.tsm_filter.update(tsm, self.img_w, self.img_h)
+            tsm, held, swap_remaining_s = self._tsm_apply_swap_hold(tsm)
+            detected_rows = [(tsm.bottom_x, tsm.slope, tsm.intercept)] \
+                if tsm.valid else []
+        else:
+            detected_rows = detect_crop_rows(
+                centers, self.img_w, self.img_h, self.n_windows, self.win_w)
+
+        debug_img = draw_debug(bgr, centers, detected_rows,
+                               self.img_w, self.img_h,
+                               held=held, swap_remaining_s=swap_remaining_s)
+        debug_msg = self.bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
+        debug_msg.header = msg.header
+        self.pub_debug.publish(debug_msg)
+
+        if not detected_rows:
+            return
+
+        avg_bx = float(np.mean([r[0] for r in detected_rows]))
+        avg_slope = float(np.mean([r[1] for r in detected_rows]))
+        heading_error_rad = float(np.arctan(avg_slope))
+
+        actual_feature = np.array([
+            avg_bx - self.img_w / 2.0,
+            self.img_h / 2.0,
+            heading_error_rad,
+        ])
+        desired_feature = np.array([0.0, actual_feature[1], 0.0])
+
+        omega_raw = visual_servoing_ctl(
+            self.camera, desired_feature, actual_feature, self.linear_vel)
+        omega = float(np.clip(
+            self.omega_scaler * omega_raw, -self.max_omega, self.max_omega))
+
+        norm_offset = float(np.clip(
+            actual_feature[0] / (self.img_w / 2.0), -1.0, 1.0))
+
+        self._last_detection_time = self.get_clock().now()
+
+        off_msg = Float32()
+        off_msg.data = norm_offset
+        self.pub_offset.publish(off_msg)
+
+        hdg_msg = Float32()
+        hdg_msg.data = heading_error_rad
+        self.pub_heading.publish(hdg_msg)
+
+        if self._enabled:
+            twist = Twist()
+            twist.linear.x = self.linear_vel
+            twist.angular.z = omega
+            self.pub_cmd_vel.publish(twist)
+
+        self.get_logger().debug(
+            "fileiras=%d offset=%.3f rumo=%.1fgraus omega=%.3f hold=%s | "
+            "rows=%d offset=%.3f heading=%.1fdeg omega=%.3f hold=%s"
+            % (len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega, held,
+               len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega, held)
+        )
+
+    # -----------------------------------------------------------------------
+    # Enable / disable service
+    # -----------------------------------------------------------------------
+    def _on_enable_service(self, request: SetBool.Request,
+                           response: SetBool.Response) -> SetBool.Response:
+        self._enabled = request.data
+        if not self._enabled:
+            self._publish_zero_cmd_vel()
+            if self.detector == "tsm":
+                self._held_anchor_x = None
+                self._swap_deadline = None
+        response.success = True
+        response.message = "enabled" if self._enabled else "disabled"
+        self.get_logger().info("row_follow/enable → %s" % response.message)
+        return response
+
+    def _publish_zero_cmd_vel(self) -> None:
+        """Publish one zero-velocity Twist to guarantee the robot stops."""
+        self.pub_cmd_vel.publish(Twist())
+
+    # -----------------------------------------------------------------------
+    # Heartbeat M10
+    # -----------------------------------------------------------------------
+    def _publish_heartbeat(self) -> None:
+        alive = False
+        if self._last_detection_time is not None:
+            elapsed = (
+                self.get_clock().now() - self._last_detection_time
+            ).nanoseconds * 1e-9
+            alive = elapsed < self.hb_timeout
+        if not alive and self._last_detection_time is not None:
+            self.get_logger().warn(
+                "crop_row_node: sem detecção de fileira — heartbeat INATIVO. "
+                "No row detection — heartbeat DEAD. "
+                "Sistema Límbico deve entrar em PERCEPTION_DEGRADED (M10).",
+                throttle_duration_sec=5.0,
+            )
+        hb = Bool()
+        hb.data = alive
+        self.pub_heartbeat.publish(hb)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = CropRowNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
