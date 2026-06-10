@@ -81,8 +81,6 @@
 #   ros2 launch sowbot_row_follow crop_row_nav.launch.py use_web_video:=false     # no HTTP stream
 #   ros2 launch sowbot_row_follow crop_row_nav.launch.py web_video_port:=8081
 
-import os
-
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
 from launch.conditions import IfCondition
@@ -112,11 +110,8 @@ def generate_launch_description():
             description="Image topic crop_row_node subscribes to and usb_cam publishes.",
         ),
         DeclareLaunchArgument(
-            "video_device",
-            default_value=os.environ.get("USB_CAM_DEVICE", "/dev/video0"),
-            description="V4L2 device node for the USB camera. "
-                        "Defaults to $USB_CAM_DEVICE written by fixusb.py "
-                        "(HiCamera preferred, integrated fallback).",
+            "video_device", default_value="/dev/video0",
+            description="V4L2 device node for the USB camera.",
         ),
         DeclareLaunchArgument(
             "use_camera", default_value="true",
