@@ -86,3 +86,23 @@ crop_row_node:
                                #   code default is 15, so this MUST be explicitly
                                #   0 to turn the clamp off — deleting the line
                                #   would re-enable it at the code default.
+    # -------------------------------------------------------------------------
+    # TSM row-swap hold — bridge germination gaps on the preferred (left) row
+    # -------------------------------------------------------------------------
+    # When the TSM anchor column jumps by more than tsm_swap_threshold_frac *
+    # image_width in a single frame, the node treats it as a potential row
+    # switch and starts a hold timer. For the duration of tsm_swap_hold_s the
+    # node keeps publishing the last accepted (left) row angle unchanged.
+    # If the left row reappears within that window the timer resets silently.
+    # If it does not, the new row is accepted once the timer expires.
+    #
+    # At linear_vel=0.15 m/s, 6 s ≈ 0.9 m of forward travel before switching.
+    # Reduce tsm_swap_hold_s if the robot overcommits to a bad angle in dense
+    # weeds; increase if germination gaps are longer than ~0.9 m.
+    #
+    # tsm_swap_threshold_frac: fraction of image width (640px → 96px at 0.15).
+    #   Should be larger than EMA drift on the same row (~10–20px) but smaller
+    #   than the inter-row distance in pixels. Tune by watching debug_image:
+    #   a false hold shows amber line without an actual row switch.
+    tsm_swap_hold_s: 6.0           # seconds to hold before accepting a row switch
+    tsm_swap_threshold_frac: 0.15  # anchor shift > frac*width triggers hold
