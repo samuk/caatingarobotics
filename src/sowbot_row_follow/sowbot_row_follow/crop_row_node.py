@@ -74,10 +74,12 @@
 from __future__ import division, print_function
 
 import math
+from typing import Optional
 
 import cv2 as cv
 import numpy as np
 import rclpy
+import rclpy.duration
 from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
@@ -338,10 +340,15 @@ def detect_crop_rows(centers: np.ndarray,
 # ===========================================================================
 
 def draw_debug(bgr: np.ndarray, centers: np.ndarray,
-               rows: list, img_w: int, img_h: int) -> np.ndarray:
+               rows: list, img_w: int, img_h: int,
+               held: bool = False, swap_remaining_s: float = 0.0) -> np.ndarray:
     """
     Desenha centros de plantas, linhas de fileira detectadas e linha central de referência.
     Draw plant centers, detected row lines, and centre reference line.
+
+    When held=True the robot is holding a stale row angle (row-swap debounce
+    active). The detected line is drawn amber and a countdown is overlaid so
+    it is immediately visible in Foxglove.
     """
     out = bgr.copy()
 
@@ -349,15 +356,23 @@ def draw_debug(bgr: np.ndarray, centers: np.ndarray,
     for (cx, cy) in centers:
         cv.circle(out, (cx, cy), 4, (255, 0, 255), -1)
 
-    # Linhas de fileira detectadas (verde) / Detected row lines (green)
+    # Linhas de fileira detectadas / Detected row lines
+    # Amber (0, 165, 255) when hold active, green (0, 255, 0) otherwise
+    line_colour = (0, 165, 255) if held else (0, 255, 0)
     for (bx, m, b) in rows:
         x_top = int(m * 0 + b)   # x no topo da imagem / x at top of image
         x_bot = int(bx)           # x na base da imagem / x at bottom of image
-        cv.line(out, (x_top, 0), (x_bot, img_h), (0, 255, 0), 2)
+        cv.line(out, (x_top, 0), (x_bot, img_h), line_colour, 2)
 
     # Linha central de referência (vermelha) — onde o robô deve estar
     # Centre reference line (red) — where the robot should be
     cv.line(out, (img_w // 2, 0), (img_w // 2, img_h), (0, 0, 255), 1)
+
+    # Row-swap hold overlay
+    if held and swap_remaining_s > 0.0:
+        label = "HOLD %.1fs" % swap_remaining_s
+        cv.putText(out, label, (8, 24),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2, cv.LINE_AA)
 
     return out
 
@@ -415,6 +430,28 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_filter_alpha", 0.4)
         self.declare_parameter("tsm_filter_jump_gate_frac", 0.35)
         self.declare_parameter("tsm_filter_max_hold", 2)
+        # -------------------------------------------------------------------
+        # TSM row-swap hold (engineering addition)
+        # -------------------------------------------------------------------
+        # When TSM switches from the preferred (left) row to a different one
+        # — identified by the anchor column jumping more than
+        # tsm_swap_threshold_frac * image_width — the node holds the last
+        # accepted row angle for tsm_swap_hold_s seconds before accepting the
+        # new row. This prevents a momentary gap in plant germination from
+        # causing the robot to track the wrong row.
+        #
+        # tsm_swap_threshold_frac: fraction of image width that the TSM anchor
+        #   must shift before we treat it as a row-switch rather than EMA drift
+        #   on the same row. At 640px width, 0.15 ≈ 96px — comfortably larger
+        #   than EMA noise but smaller than a typical inter-row gap.
+        #   Reduce if rows are close together; raise if EMA drift triggers false
+        #   holds.
+        #
+        # tsm_swap_hold_s: seconds to hold the current angle before accepting
+        #   the new row. 6.0 s at 0.15 m/s ≈ 0.9 m of forward travel — enough
+        #   to bridge a missed germination station.
+        self.declare_parameter("tsm_swap_hold_s", 6.0)
+        self.declare_parameter("tsm_swap_threshold_frac", 0.15)
 
         p = self.get_parameter
         self.image_topic: str    = p("image_topic").value
@@ -461,6 +498,14 @@ class CropRowNode(Node):
                 jump_gate_frac=p("tsm_filter_jump_gate_frac").value,
                 max_hold=p("tsm_filter_max_hold").value,
             ))
+
+            # Row-swap hold state (TSM only)
+            self._swap_hold_s: float = float(p("tsm_swap_hold_s").value)
+            self._swap_thresh_px: float = p("tsm_swap_threshold_frac").value * self.img_w
+            # Last row we committed to (anchor_x in image coords, or None before lock)
+            self._held_anchor_x: Optional[float] = None
+            # Deadline (ROS time) after which we allow a row switch; None = not pending
+            self._swap_deadline: Optional[rclpy.time.Time] = None
 
         # Modelo de câmera para a matriz de interação do servo visual
         # Camera model for the visual servoing interaction matrix
@@ -517,6 +562,102 @@ class CropRowNode(Node):
         self._hb_timer = self.create_timer(0.2, self._publish_heartbeat)
 
     # -----------------------------------------------------------------------
+    # TSM row-swap hold logic
+    # -----------------------------------------------------------------------
+
+    def _tsm_apply_swap_hold(self, tsm):
+        """Apply row-swap debounce to a TSMResult after TSMFilter.update().
+
+        Returns (tsm_to_use, held, swap_remaining_s):
+          tsm_to_use      — the TSMResult the caller should act on (may be the
+                            held one instead of the incoming one)
+          held            — True while the swap-hold timer is active
+          swap_remaining_s — seconds left on the hold (0.0 when not holding)
+
+        State machine:
+          No lock yet  → accept first valid result unconditionally and lock on it.
+          Result valid, anchor close to held → normal; reset any pending swap timer.
+          Result valid, anchor far from held → row switch detected; start/extend
+                        the swap timer and keep serving the held angle. Once the
+                        timer expires, accept the new row and re-lock.
+          Result invalid → pass through (TSMFilter's bounded-hold already deals
+                        with brief dropouts; we don't interfere here).
+        """
+        if not tsm.valid:
+            # Let TSMFilter's bounded-hold handle pure dropouts; nothing to do.
+            return tsm, False, 0.0
+
+        new_ax = float(tsm.anchor_xy[0])
+
+        # First valid detection — lock on unconditionally.
+        if self._held_anchor_x is None:
+            self._held_anchor_x = new_ax
+            self._swap_deadline = None
+            return tsm, False, 0.0
+
+        now = self.get_clock().now()
+        shift = abs(new_ax - self._held_anchor_x)
+
+        if shift <= self._swap_thresh_px:
+            # Same row — update held anchor with EMA so it tracks slow drift,
+            # and reset any pending swap timer.
+            self._held_anchor_x = 0.7 * self._held_anchor_x + 0.3 * new_ax
+            self._swap_deadline = None
+            return tsm, False, 0.0
+
+        # Anchor has jumped — possible row switch.
+        if self._swap_deadline is None:
+            # First frame suggesting a new row: arm the timer.
+            self._swap_deadline = now + rclpy.duration.Duration(
+                seconds=self._swap_hold_s)
+            self.get_logger().info(
+                "TSM row-swap hold armed: anchor shifted %.0fpx (threshold %.0fpx), "
+                "holding current angle for %.1fs"
+                % (shift, self._swap_thresh_px, self._swap_hold_s))
+
+        remaining_ns = (self._swap_deadline - now).nanoseconds
+        if remaining_ns > 0:
+            # Still within the hold window — serve the held angle.
+            remaining_s = remaining_ns * 1e-9
+            # Reconstruct a TSMResult from the held anchor_x so the visual
+            # servo controller sees a stable line, not a jumping one.
+            held_tsm = self._make_held_tsm(tsm)
+            return held_tsm, True, remaining_s
+
+        # Timer expired — accept the new row.
+        self.get_logger().info(
+            "TSM row-swap hold expired: accepting new row at anchor_x=%.0f" % new_ax)
+        self._held_anchor_x = new_ax
+        self._swap_deadline = None
+        return tsm, False, 0.0
+
+    def _make_held_tsm(self, reference_tsm):
+        """Return a TSMResult that matches the held anchor_x but keeps the
+        line geometry consistent (slope re-derived from held anchor and the
+        reference base_x projected through the held anchor).
+
+        We keep the held anchor and reuse the incoming base_x as-is — the
+        bottom-edge point is less likely to flip row than the top anchor, and
+        keeping it live means heading error still reacts to genuine row tilt.
+        If the base_x also jumps with the anchor (both ends on the new row),
+        the slope will still be wrong but the lateral offset will be held,
+        which is the more important stabilisation during a germination gap.
+        """
+        from sowbot_row_follow.triangle_scan import TSMResult
+        ax = self._held_anchor_x
+        px = reference_tsm.bottom_x
+        denom = float(self.img_h - 1) if self.img_h > 1 else 1.0
+        m = (px - ax) / denom
+        return TSMResult(
+            anchor_xy=(int(round(ax)), 0),
+            base_xy=(int(round(px)), self.img_h - 1),
+            slope=m,
+            intercept=float(ax),
+            bottom_x=float(px),
+            valid=True,
+        )
+
+    # -----------------------------------------------------------------------
     # Callback de imagem / Image callback
     # -----------------------------------------------------------------------
 
@@ -540,6 +681,9 @@ class CropRowNode(Node):
         mask = compute_exg_mask(bgr)
         centers = get_plant_centers(mask, self.min_area)
 
+        held = False
+        swap_remaining_s = 0.0
+
         if self.detector == "tsm":
             # Triangle Scan Method: single central row from the ExG mask, then
             # temporal-filtered across frames. Wrapped as a one-element list so
@@ -548,6 +692,13 @@ class CropRowNode(Node):
             tsm = detect_central_row(mask, self.tsm_params,
                                      prev_anchor=self.tsm_filter.prev_anchor)
             tsm = self.tsm_filter.update(tsm, self.img_w, self.img_h)
+
+            # Row-swap hold: if TSM has locked on and the anchor jumps to a
+            # different row, hold the last accepted angle for tsm_swap_hold_s
+            # seconds before switching. This bridges germination gaps where the
+            # preferred (left) row temporarily vanishes.
+            tsm, held, swap_remaining_s = self._tsm_apply_swap_hold(tsm)
+
             detected_rows = [(tsm.bottom_x, tsm.slope, tsm.intercept)] \
                 if tsm.valid else []
         else:
@@ -556,7 +707,9 @@ class CropRowNode(Node):
 
         # Publica imagem de depuração independentemente da detecção
         # Always publish debug image regardless of detection result
-        debug_img = draw_debug(bgr, centers, detected_rows, self.img_w, self.img_h)
+        debug_img = draw_debug(bgr, centers, detected_rows,
+                               self.img_w, self.img_h,
+                               held=held, swap_remaining_s=swap_remaining_s)
         debug_msg = self.bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
         debug_msg.header = msg.header
         self.pub_debug.publish(debug_msg)
@@ -621,10 +774,10 @@ class CropRowNode(Node):
             self.pub_cmd_vel.publish(twist)
 
         self.get_logger().debug(
-            "fileiras=%d offset=%.3f rumo=%.1fgraus omega=%.3f | "
-            "rows=%d offset=%.3f heading=%.1fdeg omega=%.3f"
-            % (len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega,
-               len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega)
+            "fileiras=%d offset=%.3f rumo=%.1fgraus omega=%.3f hold=%s | "
+            "rows=%d offset=%.3f heading=%.1fdeg omega=%.3f hold=%s"
+            % (len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega, held,
+               len(detected_rows), norm_offset, math.degrees(heading_error_rad), omega, held)
         )
 
     # -----------------------------------------------------------------------
@@ -636,6 +789,10 @@ class CropRowNode(Node):
         self._enabled = request.data
         if not self._enabled:
             self._publish_zero_cmd_vel()
+            # Reset row-swap hold so the next enable starts clean.
+            if self.detector == "tsm":
+                self._held_anchor_x = None
+                self._swap_deadline = None
         response.success = True
         response.message = "enabled" if self._enabled else "disabled"
         self.get_logger().info("row_follow/enable → %s" % response.message)
