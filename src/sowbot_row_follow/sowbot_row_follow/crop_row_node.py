@@ -393,11 +393,15 @@ class CropRowNode(Node):
     # TSM row-swap hold logic
     # -----------------------------------------------------------------------
     def _tsm_apply_swap_hold(self, tsm):
-        """Apply row-swap debounce to a TSMResult after TSMFilter.update().
+        """Apply row-swap debounce to a raw TSMResult (before TSMFilter.update()).
 
-        Holds the last accepted (left) row's anchor_x AND bottom_x together so
-        that _make_held_tsm reconstructs the correct frozen line geometry —
-        not a chimera of the old anchor and the new row's base point.
+        Must be called on the raw detector output so the full anchor jump is
+        visible — TSMFilter's EMA would smear a 240px row-switch into ~80px
+        increments that never cross the threshold.
+
+        Holds the last accepted row's anchor_x AND bottom_x together so that
+        _make_held_tsm reconstructs the correct frozen line geometry — not a
+        chimera of the old anchor and the new row's base point.
 
         Returns (tsm_to_use, held, swap_remaining_s).
         """
@@ -418,9 +422,11 @@ class CropRowNode(Node):
         shift = abs(new_ax - self._held_anchor_x)
 
         if shift <= self._swap_thresh_px:
-            # Same row — EMA-track both endpoints and reset any pending timer.
-            self._held_anchor_x = 0.7 * self._held_anchor_x + 0.3 * new_ax
-            self._held_bottom_x = 0.7 * self._held_bottom_x + 0.3 * new_bx
+            # Same row — EMA-track both endpoints (slow: operating on raw
+            # detections which have higher frame-to-frame jitter than
+            # post-filter values) and reset any pending swap timer.
+            self._held_anchor_x = 0.95 * self._held_anchor_x + 0.05 * new_ax
+            self._held_bottom_x = 0.95 * self._held_bottom_x + 0.05 * new_bx
             self._swap_deadline = None
             return tsm, False, 0.0
 
@@ -430,7 +436,7 @@ class CropRowNode(Node):
                 seconds=self._swap_hold_s)
             self.get_logger().info(
                 "TSM row-swap hold armed: anchor shifted %.0fpx (threshold %.0fpx), "
-                "holding current angle for %.1fs"
+                "holding current row for %.1fs"
                 % (shift, self._swap_thresh_px, self._swap_hold_s))
 
         remaining_ns = (self._swap_deadline - now).nanoseconds
@@ -493,10 +499,12 @@ class CropRowNode(Node):
         swap_remaining_s = 0.0
 
         if self.detector == "tsm":
+            # Swap-hold runs on the raw detector output so it sees the full
+            # anchor jump before TSMFilter's EMA has a chance to smear it.
             tsm = detect_central_row(mask, self.tsm_params,
                                      prev_anchor=self.tsm_filter.prev_anchor)
-            tsm = self.tsm_filter.update(tsm, self.img_w, self.img_h)
             tsm, held, swap_remaining_s = self._tsm_apply_swap_hold(tsm)
+            tsm = self.tsm_filter.update(tsm, self.img_w, self.img_h)
             detected_rows = [(tsm.bottom_x, tsm.slope, tsm.intercept)] \
                 if tsm.valid else []
         else:
