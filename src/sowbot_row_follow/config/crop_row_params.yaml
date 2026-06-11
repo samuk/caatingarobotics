@@ -78,7 +78,7 @@ crop_row_node:
     #     and averages their headings; swap-hold is bypassed (band partitioning
     #     prevents inter-row flipping). Widen amin_frac/amax_frac to 0.05/0.95
     #     when using tsm_n_rows > 1 so all rows fall within the search range.
-    tsm_n_rows: 1
+    tsm_n_rows: 2
 
     # Temporal filter — EMA + outlier-gate + bounded-hold over successive frames.
     tsm_filter_enable: true    # temporal EMA + outlier-gate + bounded-hold
