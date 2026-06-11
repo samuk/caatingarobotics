@@ -1,8 +1,9 @@
 # crop_row_params.yaml
 # ====================
-# Hardware-specific parameters for crop_row_node on Sowbot.
+# Hardware-specific parameters for crop_row_node and limbic_row_follow_node
+# on Sowbot.
 #
-# Location in repo: caatinga_vision/config/crop_row_params.yaml
+# Location in repo: sowbot_row_follow/config/crop_row_params.yaml
 #
 # Two values MUST be measured from the physical robot before field use:
 #   camera_height_m  — tape measure from camera lens to soil surface (m)
@@ -12,7 +13,8 @@
 # (deltaz and tilt_angle). Getting them wrong will produce a systematic
 # angular bias — the robot will still follow rows but not accurately.
 #
-# Tune detection params by watching /row_nav/debug_image in Foxglove.
+# Tune detection params by watching /caatinga_vision/row_nav/debug_image
+# in Foxglove.
 
 crop_row_node:
   ros__parameters:
@@ -21,7 +23,7 @@ crop_row_node:
     # Camera hardware — MEASURE THESE ON YOUR ROBOT before field use
     # -------------------------------------------------------------------------
     image_topic: "/devkit/camera/image_raw"  # USB camera published by usb_cam_node_exe
-    camera_index: 0            # Check available devices: v4l2-ctl --list-devices
+    debug_image_topic: "/caatinga_vision/row_nav/debug_image"  # annotated frame (Foxglove)
     image_width: 640
     image_height: 480
 
@@ -30,7 +32,7 @@ crop_row_node:
     camera_tilt_deg: -80.0     # TODO: tilt from horizontal, downward = negative (deg)
 
     # -------------------------------------------------------------------------
-    # Detection tuning — adjust while watching /row_nav/debug_image in Foxglove
+    # Detection tuning — adjust while watching debug_image_topic in Foxglove
     # -------------------------------------------------------------------------
     n_scan_windows: 8          # Vertical scan columns. More = finer but slower.
     window_width: 80           # Column width (px). Should span one full crop row.
@@ -59,7 +61,7 @@ crop_row_node:
     #   manage.py neo       -> detector=scanwin (default, this file's tuning)
     #   manage.py neo-tsm   -> detector=tsm (Triangle Scan Method)
     # Declared here only so ROS does not warn about undeclared params. The
-    # launch file overrides 'detector'. TSM tunables (512x512 frame defaults):
+    # launch file overrides 'detector'. TSM tunables (640x480 frame values):
     # -------------------------------------------------------------------------
     detector: "scanwin"        # overridden by launch; do not rely on this value
     tsm_s: 0.2                 # anchor ROI height fraction (h = s*H)
@@ -69,10 +71,21 @@ crop_row_node:
     tsm_c_frac: 1.0            # line-scan Cease point x (fraction of width)
     tsm_anchor_min_sum: 1.0    # min anchor column-sum to accept (else strip-shift)
     tsm_morph_kernel: 5        # mask opening kernel px (denoise ExG); 0 = off
+
+    # Multi-row detection — how many horizontal bands to scan simultaneously.
+    # 1 (default): single-row path with swap-hold debounce (see below).
+    # >1: detect_rows_multi partitions [amin_frac, amax_frac] into N equal bands
+    #     and averages their headings; swap-hold is bypassed (band partitioning
+    #     prevents inter-row flipping). Widen amin_frac/amax_frac to 0.05/0.95
+    #     when using tsm_n_rows > 1 so all rows fall within the search range.
+    tsm_n_rows: 1
+
+    # Temporal filter — EMA + outlier-gate + bounded-hold over successive frames.
     tsm_filter_enable: true    # temporal EMA + outlier-gate + bounded-hold
     tsm_filter_alpha: 0.4      # EMA weight on new frame; lower = smoother
     tsm_filter_jump_gate_frac: 0.35  # reject frame if jump > frac*width
     tsm_filter_max_hold: 2     # hold last across N misses, then invalid (heartbeat dies)
+
     # Multi-row disambiguation — which row to follow when two are visible.
     #   argmax (default) | leftmost_peak | rightmost_peak | spatial_prior | weighted
     # For a hard restriction, narrow tsm_amin_frac/tsm_amax_frac instead.
@@ -82,12 +95,17 @@ crop_row_node:
     tsm_prior_init_frac: 0.3   # spatial_prior: first-frame seed (frac of width)
     tsm_weight_k: 0.5          # weighted: bias strength
     tsm_weight_side: "left"    # weighted: preferred side
-    tsm_max_angle_deg: 15.0     # DISABLED (the 15deg clamp made it worse). NOTE:
-                               #   code default is 15, so this MUST be explicitly
-                               #   0 to turn the clamp off — deleting the line
-                               #   would re-enable it at the code default.
+
+    # Near-vertical angle clamp. Restricts the line-scan bottom point to a cone
+    # around the apex so the fit cannot exceed this angle off image-vertical.
+    # Set 0.0 to disable (allow any angle). The code default is 15.0, so this
+    # line MUST be present and set to 0.0 to keep the clamp off — deleting it
+    # would silently re-enable a 15° clamp at next launch.
+    tsm_max_angle_deg: 0.0     # disabled — 15deg clamp made row-following worse
+
     # -------------------------------------------------------------------------
-    # TSM row-swap hold — bridge germination gaps on the preferred (left) row
+    # TSM row-swap hold — bridge germination gaps on the preferred (left) row.
+    # Only active on the single-row path (tsm_n_rows == 1).
     # -------------------------------------------------------------------------
     # When the TSM anchor column jumps by more than tsm_swap_threshold_frac *
     # image_width in a single frame, the node treats it as a potential row
@@ -96,13 +114,37 @@ crop_row_node:
     # If the left row reappears within that window the timer resets silently.
     # If it does not, the new row is accepted once the timer expires.
     #
-    # At linear_vel=0.15 m/s, 6 s ≈ 0.9 m of forward travel before switching.
+    # At linear_vel=0.15 m/s, 9 s ≈ 1.35 m of forward travel before switching.
     # Reduce tsm_swap_hold_s if the robot overcommits to a bad angle in dense
-    # weeds; increase if germination gaps are longer than ~0.9 m.
+    # weeds; increase if germination gaps are longer than ~1.35 m.
+    # Note: node code default is 6.0 s — this file intentionally overrides
+    # that to 9.0 s based on field experience.
     #
     # tsm_swap_threshold_frac: fraction of image width (640px → 96px at 0.15).
     #   Should be larger than EMA drift on the same row (~10–20px) but smaller
     #   than the inter-row distance in pixels. Tune by watching debug_image:
-    #   a false hold shows amber line without an actual row switch.
+    #   a false hold shows an amber line without an actual row switch.
     tsm_swap_hold_s: 9.0           # seconds to hold before accepting a row switch
     tsm_swap_threshold_frac: 0.15  # anchor shift > frac*width triggers hold
+
+
+# -------------------------------------------------------------------------
+# Limbic System row-follow orchestrator
+# -------------------------------------------------------------------------
+limbic_row_follow:
+  ros__parameters:
+
+    # Distance at which Phase 1 (visual servo) hands over to Phase 2 (nav2).
+    row_follow_handover_distance: 1.0  # metres
+
+    # Time without a True heartbeat on /aoc/heartbeat/neo_vision before
+    # Phase 1 is aborted and Neo is disabled. Should be longer than
+    # crop_row_node's heartbeat_timeout_s to give Neo time to report loss.
+    heartbeat_timeout_s: 3.0
+
+    # Timeout for the /row_follow/enable service call. If Neo does not
+    # acknowledge enable or disable within this window, the action aborts.
+    enable_service_timeout_s: 2.0
+
+    # Rate at which the Phase 1 monitor loop checks distance and heartbeat.
+    monitor_rate_hz: 10.0
