@@ -85,7 +85,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32
 from std_srvs.srv import SetBool
 # TSM detector (optional backend). Imported at module load, not per-frame.
-from sowbot_row_follow.triangle_scan import detect_central_row
+from sowbot_row_follow.triangle_scan import detect_central_row, detect_rows_multi
 
 
 # ===========================================================================
@@ -236,18 +236,31 @@ def detect_crop_rows(centers: np.ndarray,
 # ===========================================================================
 def draw_debug(bgr: np.ndarray, centers: np.ndarray,
                rows: list, img_w: int, img_h: int,
-               held: bool = False, swap_remaining_s: float = 0.0) -> np.ndarray:
+               held: bool = False, swap_remaining_s: float = 0.0,
+               avg_row: Optional[tuple] = None) -> np.ndarray:
+    """Draw debug overlay.
+
+    rows      — individual detected rows; green, amber when swap-hold active.
+    avg_row   — (bx, m, b) averaged heading; drawn in red. Supplied only for
+                tsm_n_rows > 1; None for single-row and scanwin paths.
+    The vertical centre reference is drawn in grey so it does not clash with
+    the red averaged-heading line.
+    """
     out = bgr.copy()
     for (cx, cy) in centers:
         cv.circle(out, (cx, cy), 4, (255, 0, 255), -1)
-    # Amber when hold active, green otherwise
+    # Individual rows: green, amber if swap-hold active
     line_colour = (0, 165, 255) if held else (0, 255, 0)
     for (bx, m, b) in rows:
         x_top = int(m * 0 + b)
         x_bot = int(bx)
         cv.line(out, (x_top, 0), (x_bot, img_h), line_colour, 2)
-    # Centre reference (red)
-    cv.line(out, (img_w // 2, 0), (img_w // 2, img_h), (0, 0, 255), 1)
+    # Averaged heading (multi-row TSM only): red
+    if avg_row is not None:
+        bx, m, b = avg_row
+        cv.line(out, (int(b), 0), (int(bx), img_h), (0, 0, 255), 2)
+    # Vertical centre reference: thin grey (offset reference, not heading)
+    cv.line(out, (img_w // 2, 0), (img_w // 2, img_h), (128, 128, 128), 1)
     if held and swap_remaining_s > 0.0:
         label = "HOLD %.1fs" % swap_remaining_s
         cv.putText(out, label, (8, 24),
@@ -295,6 +308,7 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_weight_k", 0.5)
         self.declare_parameter("tsm_weight_side", "left")
         self.declare_parameter("tsm_max_angle_deg", 15.0)
+        self.declare_parameter("tsm_n_rows", 1)
         self.declare_parameter("tsm_filter_enable", True)
         self.declare_parameter("tsm_filter_alpha", 0.4)
         self.declare_parameter("tsm_filter_jump_gate_frac", 0.35)
@@ -324,6 +338,7 @@ class CropRowNode(Node):
         if self.detector == "tsm":
             from sowbot_row_follow.triangle_scan import (
                 TSMParams, TSMFilterParams, TSMFilter)
+            self.tsm_n_rows: int = max(1, int(p("tsm_n_rows").value))
             self.tsm_params = TSMParams(
                 s=p("tsm_s").value,
                 amin_frac=p("tsm_amin_frac").value,
@@ -340,17 +355,22 @@ class CropRowNode(Node):
                 weight_side=str(p("tsm_weight_side").value),
                 max_angle_deg=p("tsm_max_angle_deg").value,
             )
-            self.tsm_filter = TSMFilter(TSMFilterParams(
+            _fp = TSMFilterParams(
                 enable=p("tsm_filter_enable").value,
                 alpha=p("tsm_filter_alpha").value,
                 jump_gate_frac=p("tsm_filter_jump_gate_frac").value,
                 max_hold=p("tsm_filter_max_hold").value,
-            ))
-            # Row-swap hold state
+            )
+            # One independent filter per row slot; all share the same params.
+            self.tsm_filters: list = [
+                TSMFilter(_fp) for _ in range(self.tsm_n_rows)
+            ]
+            # Row-swap hold state (single-row path only; unused when tsm_n_rows > 1
+            # because band-partitioned detection prevents inter-row flipping).
             self._swap_hold_s: float = float(p("tsm_swap_hold_s").value)
             self._swap_thresh_px: float = p("tsm_swap_threshold_frac").value * self.img_w
             self._held_anchor_x: Optional[float] = None
-            self._held_bottom_x: Optional[float] = None  # paired with _held_anchor_x
+            self._held_bottom_x: Optional[float] = None
             self._swap_deadline: Optional[rclpy.time.Time] = None
 
         self.camera = Camera(
@@ -390,7 +410,7 @@ class CropRowNode(Node):
         self._hb_timer = self.create_timer(0.2, self._publish_heartbeat)
 
     # -----------------------------------------------------------------------
-    # TSM row-swap hold logic
+    # TSM row-swap hold logic  (single-row path only)
     # -----------------------------------------------------------------------
     def _tsm_apply_swap_hold(self, tsm):
         """Apply row-swap debounce to a raw TSMResult (before TSMFilter.update()).
@@ -497,23 +517,57 @@ class CropRowNode(Node):
 
         held = False
         swap_remaining_s = 0.0
+        # avg_row: (bx, m, b) averaged over all valid detected rows. Used both
+        # as the servo input and as the red overlay line in debug_image.
+        # Set only when tsm_n_rows > 1; the single-row paths leave it None so
+        # draw_debug omits the separate red line (the green row IS the heading).
+        avg_row: Optional[tuple] = None
 
         if self.detector == "tsm":
-            # Swap-hold runs on the raw detector output so it sees the full
-            # anchor jump before TSMFilter's EMA has a chance to smear it.
-            tsm = detect_central_row(mask, self.tsm_params,
-                                     prev_anchor=self.tsm_filter.prev_anchor)
-            tsm, held, swap_remaining_s = self._tsm_apply_swap_hold(tsm)
-            tsm = self.tsm_filter.update(tsm, self.img_w, self.img_h)
-            detected_rows = [(tsm.bottom_x, tsm.slope, tsm.intercept)] \
-                if tsm.valid else []
+            if self.tsm_n_rows > 1:
+                # Multi-row path: detect_rows_multi normalises the mask once and
+                # runs an independent TSM scan in each horizontal band.
+                raw_results = detect_rows_multi(
+                    mask, self.tsm_params,
+                    n_rows=self.tsm_n_rows,
+                    prev_anchors=[f.prev_anchor for f in self.tsm_filters],
+                )
+                filtered = [
+                    self.tsm_filters[i].update(r, self.img_w, self.img_h)
+                    for i, r in enumerate(raw_results)
+                ]
+                detected_rows = [
+                    (r.bottom_x, r.slope, r.intercept)
+                    for r in filtered if r.valid
+                ]
+                if detected_rows:
+                    avg_row = (
+                        float(np.mean([r[0] for r in detected_rows])),
+                        float(np.mean([r[1] for r in detected_rows])),
+                        float(np.mean([r[2] for r in detected_rows])),
+                    )
+            else:
+                # Single-row path with swap-hold debounce.
+                tsm_raw = detect_central_row(
+                    mask, self.tsm_params,
+                    prev_anchor=self.tsm_filters[0].prev_anchor,
+                )
+                tsm_raw, held, swap_remaining_s = self._tsm_apply_swap_hold(tsm_raw)
+                tsm = self.tsm_filters[0].update(tsm_raw, self.img_w, self.img_h)
+                detected_rows = (
+                    [(tsm.bottom_x, tsm.slope, tsm.intercept)] if tsm.valid else []
+                )
+                # avg_row stays None: single green line is the heading; no red overlay.
         else:
             detected_rows = detect_crop_rows(
                 centers, self.img_w, self.img_h, self.n_windows, self.win_w)
 
-        debug_img = draw_debug(bgr, centers, detected_rows,
-                               self.img_w, self.img_h,
-                               held=held, swap_remaining_s=swap_remaining_s)
+        debug_img = draw_debug(
+            bgr, centers, detected_rows,
+            self.img_w, self.img_h,
+            held=held, swap_remaining_s=swap_remaining_s,
+            avg_row=avg_row,
+        )
         debug_msg = self.bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
         debug_msg.header = msg.header
         self.pub_debug.publish(debug_msg)
@@ -521,8 +575,13 @@ class CropRowNode(Node):
         if not detected_rows:
             return
 
-        avg_bx = float(np.mean([r[0] for r in detected_rows]))
-        avg_slope = float(np.mean([r[1] for r in detected_rows]))
+        # Servo uses avg_row when pre-computed (multi-row TSM); otherwise
+        # compute it from detected_rows (single-row TSM, scanwin).
+        if avg_row is not None:
+            avg_bx, avg_slope = avg_row[0], avg_row[1]
+        else:
+            avg_bx = float(np.mean([r[0] for r in detected_rows]))
+            avg_slope = float(np.mean([r[1] for r in detected_rows]))
         heading_error_rad = float(np.arctan(avg_slope))
 
         actual_feature = np.array([
