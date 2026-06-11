@@ -36,7 +36,10 @@ crop_row_node:
     # -------------------------------------------------------------------------
     n_scan_windows: 8          # Vertical scan columns. More = finer but slower.
     window_width: 80           # Column width (px). Should span one full crop row.
-    min_contour_area: 10.0     # Min contour area (px²). Increase to filter soil noise.
+    # Raised from 10.0: filters soil speckle and small weed fragments from the
+    # debug overlay. Does not affect TSM (which uses the binary mask directly),
+    # but gives a cleaner plant-centre visualisation for tuning.
+    min_contour_area: 40.0     # Min contour area (px²). Increase to filter soil noise.
 
     # -------------------------------------------------------------------------
     # Velocity — start conservative, increase only once row-following is stable
@@ -64,19 +67,39 @@ crop_row_node:
     # launch file overrides 'detector'. TSM tunables (640x480 frame values):
     # -------------------------------------------------------------------------
     detector: "scanwin"        # overridden by launch; do not rely on this value
-    tsm_s: 0.2                 # anchor ROI height fraction (h = s*H)
-    tsm_amin_frac: 0.2         # anchor column search start (fraction of width)
-    tsm_amax_frac: 0.7         # anchor column search end (fraction of width)
+    tsm_s: 0.2                 # anchor ROI height fraction (h = s*H); strip = 96px at 480p
+
+    # Search range for the anchor scan, shared across all band slots.
+    # With tsm_n_rows=2, this range is split into two equal bands:
+    #   left  band: cols  64–304  (amin_frac .. midpoint)
+    #   right band: cols 304–544  (midpoint  .. amax_frac)
+    # Each band is 240px wide — raised from the previous 160px so sparse
+    # end-of-bed frames have more column coverage and a more stable column sum.
+    # If a row appears outside this range it will not be detected; widen further
+    # if the camera field of view shows rows near the image edges.
+    tsm_amin_frac: 0.1         # anchor column search start (fraction of width)
+    tsm_amax_frac: 0.85        # anchor column search end (fraction of width)
+
     tsm_b_frac: 0.0            # line-scan Begin point x (fraction of width)
     tsm_c_frac: 1.0            # line-scan Cease point x (fraction of width)
-    tsm_anchor_min_sum: 1.0    # min anchor column-sum to accept (else strip-shift)
+
+    # Minimum lit-pixel column-sum in the anchor ROI strip to accept an anchor.
+    # If no column clears this threshold the strip shifts down (end-of-row
+    # handling) rather than locking onto noise. At 640x480 with tsm_s=0.2 the
+    # strip is 96px tall; a real crop column carries ~20–40 lit px over that
+    # height after the morph opening, so 8.0 rejects single-pixel artefacts
+    # and thin weed fragments while passing even sparse germination.
+    # Raised from 1.0 which allowed end-of-bed speckle to anchor and caused
+    # the green-line crossing seen in field run frames 20–22.
+    tsm_anchor_min_sum: 8.0
+
     tsm_morph_kernel: 5        # mask opening kernel px (denoise ExG); 0 = off
 
     # Multi-row detection — how many horizontal bands to scan simultaneously.
     # 1 (default): single-row path with swap-hold debounce (see below).
     # >1: detect_rows_multi partitions [amin_frac, amax_frac] into N equal bands
     #     and averages their headings; swap-hold is bypassed (band partitioning
-    #     prevents inter-row flipping). Widen amin_frac/amax_frac to 0.05/0.95
+    #     prevents inter-row flipping). Widen amin_frac/amax_frac to 0.1/0.85+
     #     when using tsm_n_rows > 1 so all rows fall within the search range.
     tsm_n_rows: 2
 
@@ -86,7 +109,10 @@ crop_row_node:
     tsm_filter_jump_gate_frac: 0.35  # reject frame if jump > frac*width
     tsm_filter_max_hold: 2     # hold last across N misses, then invalid (heartbeat dies)
 
-    # Multi-row disambiguation — which row to follow when two are visible.
+    # Anchor selection mode — applies within each band when tsm_n_rows > 1.
+    # With a 240px band and good germination density there is usually only one
+    # peak per band, so the mode rarely changes the result. Kept at
+    # leftmost_peak as a tie-breaker for the left band when two sub-peaks exist.
     #   argmax (default) | leftmost_peak | rightmost_peak | spatial_prior | weighted
     # For a hard restriction, narrow tsm_amin_frac/tsm_amax_frac instead.
     tsm_anchor_select: "leftmost_peak"   # PREFER LEFT (was OK in field)
@@ -105,7 +131,8 @@ crop_row_node:
 
     # -------------------------------------------------------------------------
     # TSM row-swap hold — bridge germination gaps on the preferred (left) row.
-    # Only active on the single-row path (tsm_n_rows == 1).
+    # NOTE: only active on the single-row path (tsm_n_rows == 1).
+    # With tsm_n_rows=2 these params are declared but unused at runtime.
     # -------------------------------------------------------------------------
     # When the TSM anchor column jumps by more than tsm_swap_threshold_frac *
     # image_width in a single frame, the node treats it as a potential row
