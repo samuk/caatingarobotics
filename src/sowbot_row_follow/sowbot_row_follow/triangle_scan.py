@@ -302,10 +302,36 @@ def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> int:
     return best_x
 
 
+def _detect_from_mask01(mask01: np.ndarray,
+                        p: TSMParams,
+                        prev_anchor: Optional[int] = None) -> TSMResult:
+    """Run TSM on an already-normalised float32 mask (morph_kernel is ignored).
+
+    Used by detect_central_row and detect_rows_multi to avoid redundant mask
+    normalisation when running multiple bands on the same frame.
+    """
+    h_img, _ = mask01.shape
+    ax = anchor_scan(mask01, p, prev_anchor)
+    if ax is None:
+        return TSMResult((0, 0), (0, 0), 0.0, 0.0, 0.0, False)
+    px = line_scan(mask01, ax, p)
+    denom = float(h_img - 1) if h_img > 1 else 1.0
+    m = (px - ax) / denom
+    b = float(ax)
+    return TSMResult(
+        anchor_xy=(ax, 0),
+        base_xy=(px, h_img - 1),
+        slope=m,
+        intercept=b,
+        bottom_x=float(px),
+        valid=True,
+    )
+
+
 def detect_central_row(mask: np.ndarray,
                        params: Optional[TSMParams] = None,
                        prev_anchor: Optional[int] = None) -> TSMResult:
-    """Run TSM on a crop-row mask. Returns the central row in node convention.
+    """Run TSM on a crop-row mask. Returns the detected row in node convention.
 
     Node convention: x = m*y + b  (x as a function of y), matching the existing
     crop_row_node fit_line / detect_crop_rows output so downstream visual
@@ -319,24 +345,65 @@ def detect_central_row(mask: np.ndarray,
     """
     p = params or TSMParams()
     mask01 = _normalise_mask(mask, p.morph_kernel)
-    h_img, _ = mask01.shape
+    return _detect_from_mask01(mask01, p, prev_anchor)
 
-    ax = anchor_scan(mask01, p, prev_anchor)
-    if ax is None:
-        return TSMResult((0, 0), (0, 0), 0.0, 0.0, 0.0, False)
 
-    px = line_scan(mask01, ax, p)
-    denom = float(h_img - 1) if h_img > 1 else 1.0
-    m = (px - ax) / denom
-    b = float(ax)
-    return TSMResult(
-        anchor_xy=(ax, 0),
-        base_xy=(px, h_img - 1),
-        slope=m,
-        intercept=b,
-        bottom_x=float(px),
-        valid=True,
-    )
+def detect_rows_multi(
+    mask: np.ndarray,
+    params: Optional[TSMParams] = None,
+    n_rows: int = 1,
+    prev_anchors: Optional[list] = None,
+) -> list:
+    """Run TSM N times with horizontally-partitioned anchor search bands.
+
+    Partitions [params.amin_frac, params.amax_frac] into n_rows equal-width
+    horizontal bands and runs an independent TSM scan in each band. Returns a
+    list of TSMResult in left-to-right band order; invalid detections are
+    included in-place (caller handles per-slot temporal filtering).
+
+    The mask is normalised and denoised exactly once (using params.morph_kernel)
+    and reused across all band scans — so this costs little more than a single
+    detect_central_row call.
+
+    When n_rows == 1 this is exactly equivalent to detect_central_row.
+
+    Note on search range: for multi-row use, widen tsm_amin_frac / tsm_amax_frac
+    to span all expected rows (e.g. 0.05 / 0.95) since this function partitions
+    that range into equal bands.
+    """
+    from dataclasses import replace as _replace
+
+    p = params or TSMParams()
+    n = max(1, int(n_rows))
+
+    # Normalise + denoise once; band calls skip the opening (morph_kernel=0).
+    mask01 = _normalise_mask(mask, p.morph_kernel)
+
+    if n == 1:
+        prev = prev_anchors[0] if (prev_anchors and len(prev_anchors) > 0) else None
+        p0 = _replace(p, morph_kernel=0)
+        return [_detect_from_mask01(mask01, p0, prev)]
+
+    lo = p.amin_frac
+    hi = p.amax_frac
+    if hi <= lo:          # degenerate config: expand by one pixel fraction
+        hi = lo + 1.0 / max(mask01.shape[1], 1)
+    band_w = (hi - lo) / n
+
+    results = []
+    for i in range(n):
+        band_p = _replace(
+            p,
+            amin_frac=lo + i * band_w,
+            amax_frac=lo + (i + 1) * band_w,
+            morph_kernel=0,
+        )
+        prev = (prev_anchors[i]
+                if (prev_anchors and i < len(prev_anchors))
+                else None)
+        results.append(_detect_from_mask01(mask01, band_p, prev))
+
+    return results
 
 
 class TSMFilter:
