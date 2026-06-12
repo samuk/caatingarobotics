@@ -84,13 +84,25 @@ def generate_launch_description():
                 executable="parameter_bridge",
                 name="ros_gz_bridge",
                 output="screen",
+                # In Gazebo Harmonic, bare plugin topic names (no leading /)
+                # are scoped under /model/<name>/. The bridge ROS↔Gz topic
+                # mapping syntax is:
+                #   ros_topic@ros_type[gz_type:gz_topic  (Gz→ROS)
+                #   ros_topic@ros_type]gz_type:gz_topic  (ROS→Gz)
+                #   ros_topic@ros_type@gz_type:gz_topic  (bidirectional)
+                # Unscoped Gz topics (/clock, /tf) need no model prefix.
                 arguments=[
-                    "/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist",
-                    "/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
-                    "/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V",
-                    "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
-                    "/imu@sensor_msgs/msg/Imu[gz.msgs.IMU",
-                    "/gps/fix@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat",
+                    # ROS→Gz: Nav2 cmd_vel drives the diff-drive plugin
+                    "/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist:/model/agro_robot/cmd_vel",
+                    # Gz→ROS: diff-drive odometry (Harmonic uses 'odometry' not 'odom')
+                    "/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry:/model/agro_robot/odometry",
+                    # Gz→ROS: TF from diff-drive + joint state publisher
+                    "/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V:/model/agro_robot/tf",
+                    # Gz→ROS: sensors (model-scoped)
+                    "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan:/model/agro_robot/scan",
+                    "/imu@sensor_msgs/msg/Imu[gz.msgs.IMU:/model/agro_robot/imu",
+                    "/gps/fix@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat:/model/agro_robot/gps",
+                    # Gz→ROS: sim clock (world-scoped, no model prefix)
                     "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
                 ],
                 parameters=[{"use_sim_time": True}],
