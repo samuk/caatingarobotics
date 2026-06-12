@@ -237,14 +237,20 @@ def detect_crop_rows(centers: np.ndarray,
 def draw_debug(bgr: np.ndarray, centers: np.ndarray,
                rows: list, img_w: int, img_h: int,
                held: bool = False, swap_remaining_s: float = 0.0,
-               avg_row: Optional[tuple] = None) -> np.ndarray:
+               avg_row: Optional[tuple] = None,
+               row_offset_active: bool = False) -> np.ndarray:
     """Draw debug overlay.
 
-    rows      — individual detected rows; green, amber when swap-hold active.
-    avg_row   — (bx, m, b) averaged heading; drawn in red. Supplied only for
-                tsm_n_rows > 1; None for single-row and scanwin paths.
+    rows             — individual detected rows; green, amber when swap-hold active.
+    avg_row          — (bx, m, b) averaged heading. Supplied only for tsm_n_rows > 1;
+                       None for single-row and scanwin paths.
+                         red    — all bands valid, heading is a true average.
+                         yellow — single-row offset active (one band missing; heading
+                                  is the detected row shifted by _last_row_spacing_px/2
+                                  toward the missing band).
+    row_offset_active — True when the single-row offset has been applied this frame.
     The vertical centre reference is drawn in grey so it does not clash with
-    the red averaged-heading line.
+    the averaged-heading line.
     """
     out = bgr.copy()
     for (cx, cy) in centers:
@@ -255,16 +261,22 @@ def draw_debug(bgr: np.ndarray, centers: np.ndarray,
         x_top = int(m * 0 + b)
         x_bot = int(bx)
         cv.line(out, (x_top, 0), (x_bot, img_h), line_colour, 2)
-    # Averaged heading (multi-row TSM only): red
+    # Averaged heading (multi-row TSM only):
+    #   red    — full average (all bands valid)
+    #   yellow — single-row offset applied (one or more bands missing)
     if avg_row is not None:
         bx, m, b = avg_row
-        cv.line(out, (int(b), 0), (int(bx), img_h), (0, 0, 255), 2)
+        avg_colour = (0, 255, 255) if row_offset_active else (0, 0, 255)
+        cv.line(out, (int(b), 0), (int(bx), img_h), avg_colour, 2)
     # Vertical centre reference: thin grey (offset reference, not heading)
     cv.line(out, (img_w // 2, 0), (img_w // 2, img_h), (128, 128, 128), 1)
     if held and swap_remaining_s > 0.0:
         label = "HOLD %.1fs" % swap_remaining_s
         cv.putText(out, label, (8, 24),
                    cv.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2, cv.LINE_AA)
+    if row_offset_active:
+        cv.putText(out, "1-ROW", (8, 48),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv.LINE_AA)
     return out
 
 
@@ -315,6 +327,7 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_filter_max_hold", 2)
         self.declare_parameter("tsm_swap_hold_s", 6.0)
         self.declare_parameter("tsm_swap_threshold_frac", 0.15)
+        self.declare_parameter("tsm_single_row_offset_px", 95)
 
         p = self.get_parameter
         self.image_topic: str    = p("image_topic").value
@@ -372,6 +385,17 @@ class CropRowNode(Node):
             self._held_anchor_x: Optional[float] = None
             self._held_bottom_x: Optional[float] = None
             self._swap_deadline: Optional[rclpy.time.Time] = None
+
+            # Option C single-row offset (multi-row path only).
+            # Tracks the observed pixel distance between the outermost valid
+            # rows from frames where all tsm_n_rows bands fired.  When only a
+            # subset of bands fire, avg_row is shifted by half this spacing
+            # toward the missing band(s) so the servo aims between the rows
+            # rather than directly at the one visible row.
+            # Seeded to 2 × tsm_single_row_offset_px so the first single-row
+            # frame uses a reasonable value before any two-row frame is seen.
+            _offset_seed = float(p("tsm_single_row_offset_px").value)
+            self._last_row_spacing_px: float = _offset_seed * 2.0
 
         self.camera = Camera(
             deltaz=p("camera_height_m").value,
@@ -517,11 +541,13 @@ class CropRowNode(Node):
 
         held = False
         swap_remaining_s = 0.0
-        # avg_row: (bx, m, b) averaged over all valid detected rows. Used both
-        # as the servo input and as the red overlay line in debug_image.
-        # Set only when tsm_n_rows > 1; the single-row paths leave it None so
-        # draw_debug omits the separate red line (the green row IS the heading).
+        # avg_row: (bx, m, b) heading used for visual servoing and red/yellow
+        # overlay in debug_image.  Set only for tsm_n_rows > 1; the single-row
+        # paths leave it None so draw_debug omits the separate overlay line.
         avg_row: Optional[tuple] = None
+        # row_offset_active: True when avg_row has been shifted by the single-row
+        # offset (one or more bands missing).  Triggers yellow overlay + label.
+        row_offset_active: bool = False
 
         if self.detector == "tsm":
             if self.tsm_n_rows > 1:
@@ -541,11 +567,37 @@ class CropRowNode(Node):
                     for r in filtered if r.valid
                 ]
                 if detected_rows:
-                    avg_row = (
-                        float(np.mean([r[0] for r in detected_rows])),
-                        float(np.mean([r[1] for r in detected_rows])),
-                        float(np.mean([r[2] for r in detected_rows])),
-                    )
+                    n_valid = len(detected_rows)
+                    avg_bx = float(np.mean([r[0] for r in detected_rows]))
+                    avg_m  = float(np.mean([r[1] for r in detected_rows]))
+                    avg_b  = float(np.mean([r[2] for r in detected_rows]))
+
+                    if n_valid == self.tsm_n_rows:
+                        # All bands valid: update observed inter-row spacing.
+                        # Guard against degenerate frames where both rows overlap.
+                        bx_vals = [r[0] for r in detected_rows]
+                        spacing = float(max(bx_vals) - min(bx_vals))
+                        if spacing > 20.0:
+                            self._last_row_spacing_px = spacing
+                    else:
+                        # Partial detection (Option C): shift avg_row by half
+                        # the last observed spacing toward the missing band(s).
+                        valid_idx   = [i for i, r in enumerate(filtered) if r.valid]
+                        missing_idx = [i for i in range(self.tsm_n_rows)
+                                       if i not in set(valid_idx)]
+                        valid_c   = sum(valid_idx)   / len(valid_idx)
+                        missing_c = sum(missing_idx) / len(missing_idx)
+                        sign = +1.0 if missing_c > valid_c else -1.0
+                        offset = sign * self._last_row_spacing_px / 2.0
+                        avg_bx += offset
+                        avg_b  += offset
+                        row_offset_active = True
+                        self.get_logger().debug(
+                            "single-row offset: %d/%d bands valid, shift %.1fpx (%s)"
+                            % (n_valid, self.tsm_n_rows, abs(offset),
+                               "right" if sign > 0 else "left"))
+
+                    avg_row = (avg_bx, avg_m, avg_b)
             else:
                 # Single-row path with swap-hold debounce.
                 tsm_raw = detect_central_row(
@@ -567,6 +619,7 @@ class CropRowNode(Node):
             self.img_w, self.img_h,
             held=held, swap_remaining_s=swap_remaining_s,
             avg_row=avg_row,
+            row_offset_active=row_offset_active,
         )
         debug_msg = self.bridge.cv2_to_imgmsg(debug_img, encoding="bgr8")
         debug_msg.header = msg.header
