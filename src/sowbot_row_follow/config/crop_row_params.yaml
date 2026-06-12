@@ -95,6 +95,16 @@ crop_row_node:
 
     tsm_morph_kernel: 5        # mask opening kernel px (denoise ExG); 0 = off
 
+    # Single-row offset seed — used by the adaptive (Option C) heading correction.
+    # When only a subset of tsm_n_rows bands fire, avg_row is shifted toward
+    # the missing band by _last_row_spacing_px / 2 pixels.  _last_row_spacing_px
+    # is updated every frame where all bands are valid and is seeded to
+    # 2 × tsm_single_row_offset_px at startup.
+    # Set this to approximately half the expected inter-row pixel separation so
+    # the first single-row frame gets a reasonable offset before any two-row
+    # frame is seen. From field run: rows ~190px apart → half = 95.
+    tsm_single_row_offset_px: 95
+
     # Multi-row detection — how many horizontal bands to scan simultaneously.
     # 1 (default): single-row path with swap-hold debounce (see below).
     # >1: detect_rows_multi partitions [amin_frac, amax_frac] into N equal bands
