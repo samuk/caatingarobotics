@@ -19,13 +19,19 @@ def generate_launch_description():
     y_arg = DeclareLaunchArgument("y", default_value="0.0")
     z_arg = DeclareLaunchArgument("z", default_value="0.3")
 
+    world_arg = DeclareLaunchArgument(
+        "world",
+        default_value="minha_fazenda.sdf",
+        description="SDF world file name inside agro_robot_sim/worlds/",
+    )
+
     urdf_arg = DeclareLaunchArgument(
         "urdf",
-        default_value="agro_robot.urdf.xacro",
+        default_value="sowbot_01.xacro",
         description="URDF/xacro filename inside agro_robot_sim/urdf/",
     )
 
-    # 1. open gazebo harmonic
+    # 1. open gazebo
     world = LaunchConfiguration("world")
     world_file = PathJoinSubstitution([pkg_share, "worlds", world])
     gz_sim = IncludeLaunchDescription(
@@ -38,7 +44,7 @@ def generate_launch_description():
         }.items(),
     )
 
-    # 2. robot_state_publisher — xacro file resolved from urdf arg
+    # 2. robot_state_publisher
     xacro_file = PathJoinSubstitution([pkg_share, "urdf", LaunchConfiguration("urdf")])
     robot_state_publisher = Node(
         package="robot_state_publisher",
@@ -76,6 +82,13 @@ def generate_launch_description():
     )
 
     # 4. topic bridge
+    # The xacro declares bare plugin topics (cmd_vel, odom, tf, …) which Gazebo
+    # scopes to /model/agro_robot/<topic> at runtime.  parameter_bridge argument
+    # strings do NOT support gz topic remapping via the colon-suffix notation
+    # ("gz.msgs.Twist:/model/agro_robot/cmd_vel") — that string is parsed as the
+    # type name and produces "No template specialization for the pair".
+    # Use the config_file parameter with a YAML mapping instead.
+    bridge_config = os.path.join(pkg_share, "config", "ros_gz_bridge.yaml")
     ros_gz_bridge = TimerAction(
         period=4.0,
         actions=[
@@ -84,28 +97,10 @@ def generate_launch_description():
                 executable="parameter_bridge",
                 name="ros_gz_bridge",
                 output="screen",
-                # In Gazebo Harmonic, bare plugin topic names (no leading /)
-                # are scoped under /model/<name>/. The bridge ROS↔Gz topic
-                # mapping syntax is:
-                #   ros_topic@ros_type[gz_type:gz_topic  (Gz→ROS)
-                #   ros_topic@ros_type]gz_type:gz_topic  (ROS→Gz)
-                #   ros_topic@ros_type@gz_type:gz_topic  (bidirectional)
-                # Unscoped Gz topics (/clock, /tf) need no model prefix.
-                arguments=[
-                    # ROS→Gz: Nav2 cmd_vel drives the diff-drive plugin
-                    "/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist:/model/agro_robot/cmd_vel",
-                    # Gz→ROS: diff-drive odometry (Harmonic uses 'odometry' not 'odom')
-                    "/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry:/model/agro_robot/odometry",
-                    # Gz→ROS: TF from diff-drive + joint state publisher
-                    "/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V:/model/agro_robot/tf",
-                    # Gz→ROS: sensors (model-scoped)
-                    "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan:/model/agro_robot/scan",
-                    "/imu@sensor_msgs/msg/Imu[gz.msgs.IMU:/model/agro_robot/imu",
-                    "/gps/fix@sensor_msgs/msg/NavSatFix[gz.msgs.NavSat:/model/agro_robot/gps",
-                    # Gz→ROS: sim clock (world-scoped, no model prefix)
-                    "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
+                parameters=[
+                    {"use_sim_time": True},
+                    {"config_file": bridge_config},
                 ],
-                parameters=[{"use_sim_time": True}],
             )
         ],
     )
@@ -114,6 +109,7 @@ def generate_launch_description():
         x_arg,
         y_arg,
         z_arg,
+        world_arg,
         urdf_arg,
         gz_sim,
         robot_state_publisher,
