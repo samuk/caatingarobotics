@@ -81,6 +81,27 @@ class TSMParams:
     # diagonal. Set 0 (or >=90) to disable and allow any angle. Raise it if the
     # row legitimately appears tilted (steep camera angle, headland re-acquire).
     max_angle_deg: float = 15.0
+    # ── Fit mode ──────────────────────────────────────────────────────────────
+    # "tsm"    — paper-faithful anchor_scan + line_scan (single free endpoint
+    #            P, apex A fixed by anchor_scan). Default; unchanged behaviour.
+    # "ransac" — engineering addition. anchor_scan still runs first (so band
+    #            search / row-swap / multi-row bookkeeping upstream is
+    #            unaffected); the LINE itself is then a RANSAC fit directly
+    #            on raw mask pixel coordinates within [amin_frac, amax_frac],
+    #            constrained to the same near-vertical max_angle_deg cone.
+    #            Crucially this scores candidates by inlier pixel count within
+    #            a narrow x-corridor of the candidate line (ransac_corridor_px)
+    #            — NOT by total mass in a wide band — so clutter that is
+    #            spatially separated from the candidate line contributes
+    #            nothing regardless of how much mass it has. This preserves
+    #            the spatial-locality property that makes anchor_scan/
+    #            line_scan robust, while fitting through many pixels instead
+    #            of one fixed apex + one free endpoint.
+    fit_mode: str = "tsm"
+    ransac_iters: int = 60            # number of random 2-pixel candidate lines to try
+    ransac_corridor_px: float = 6.0   # inlier band half-width (px) around a candidate line
+    ransac_min_inliers: int = 30      # min inlier pixel count to trust the RANSAC fit
+    ransac_max_points: int = 2000     # subsample mask pixels above this count (speed)
 
 
 @dataclass
@@ -302,6 +323,126 @@ def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> int:
     return best_x
 
 
+def ransac_line_fit(mask01: np.ndarray, p: TSMParams,
+                    anchor_x: int, amin: int, amax: int) -> Optional[tuple]:
+    """RANSAC fit of x = m*y + b directly on raw mask pixel coordinates.
+
+    Engineering addition (NOT from the paper). Unlike line_scan (one fixed
+    apex + one free endpoint argmax) or naive band-centroid averaging (which
+    collapses each row-band's full width to one point, so a stray pixel
+    anywhere in a wide band can drag that band's centroid), this fits
+    through every individual mask pixel in [amin, amax] but SCORES each
+    candidate line only by pixels that fall within ransac_corridor_px of it.
+    A clutter clump that sits outside that corridor contributes nothing to
+    the winning candidate's score no matter how much mass it has — the same
+    spatial-locality property that makes the paper's method robust, applied
+    here to a real multi-point fit instead of a single free endpoint.
+
+    Candidates are constrained to the near-vertical cone around anchor_x
+    (same max_angle_deg as line_scan), and EVERY candidate line must be seeded
+    by one point drawn from the apex strip (the same top ROI anchor_scan used)
+    and one point from elsewhere in the mask. This is the key difference from
+    a naive "two random pixels" RANSAC: checking only the extrapolated y=0
+    intercept of an arbitrary pixel pair is not a real constraint — two
+    points from a clump far from the apex can still extrapolate to land near
+    anchor_x by chance, then win on corridor mass alone. Anchoring one seed
+    point to genuine apex-region evidence closes that loophole, mirroring
+    line_scan's fixed-apex/free-endpoint structure while still fitting
+    through every inlier pixel rather than one fixed point and one free one.
+
+    Returns (m, b, n_inliers) in node convention (x = m*y + b), or None if
+    the best candidate has fewer than p.ransac_min_inliers support (caller
+    should fall back to the "tsm" line_scan in that case).
+    """
+    import math
+    h_img, w_img = mask01.shape
+    amin = max(0, min(amin, w_img - 1))
+    amax = max(amin + 1, min(amax, w_img))
+
+    ys_all, xs_all = np.nonzero(mask01[:, amin:amax])
+    if ys_all.size == 0:
+        return None
+    xs_all = xs_all + amin
+
+    # Subsample for speed on dense masks; doesn't change which structures are
+    # present, only how many points represent them.
+    if xs_all.size > p.ransac_max_points:
+        rng_sub = np.random.default_rng(1)
+        idx = rng_sub.choice(xs_all.size, size=p.ransac_max_points, replace=False)
+        ys_all = ys_all[idx]
+        xs_all = xs_all[idx]
+
+    ys_f = ys_all.astype(np.float64)
+    xs_f = xs_all.astype(np.float64)
+    n_pts = xs_f.size
+    denom_h = float(h_img - 1) if h_img > 1 else 1.0
+
+    # Apex-strip seed pool: same top ROI height anchor_scan used (h = s*H),
+    # further restricted to points near anchor_x (within the same cone used
+    # below). This is necessary, not just belt-and-braces: if an off-row
+    # clump happens to also intersect the apex strip (e.g. a wide weed patch
+    # near the top of frame), pairing two points drawn from inside that
+    # clump is itself a valid "apex-seeded" candidate and can still win on
+    # corridor mass. anchor_scan already identified the correct row's apex
+    # column (anchor_x) via its own column-sum logic; restricting seed pairs
+    # to genuinely originate near that column — not just "somewhere in the
+    # top strip" — is what actually closes the loophole.
+    apex_h = max(1, int(round(p.s * h_img)))
+    if p.max_angle_deg and 0 < p.max_angle_deg < 90:
+        apex_cone_px = apex_h * math.tan(math.radians(p.max_angle_deg))
+    else:
+        apex_cone_px = float(w_img)  # disabled: no angular restriction
+    near_anchor = np.abs(xs_f - anchor_x) <= apex_cone_px
+    apex_pool = np.nonzero((ys_f < apex_h) & near_anchor)[0]
+    if apex_pool.size == 0:
+        return None  # no apex-region support at all; let caller fall back
+
+    # Near-vertical cone around the apex, same convention as line_scan.
+    max_dx = denom_h
+    if p.max_angle_deg and 0 < p.max_angle_deg < 90:
+        max_dx = denom_h * math.tan(math.radians(p.max_angle_deg))
+
+    rng = np.random.default_rng(0)  # deterministic: same mask -> same fit
+    best_m, best_b, best_n = 0.0, float(anchor_x), -1
+
+    n_iters = max(1, int(p.ransac_iters))
+    for _ in range(n_iters):
+        i = int(rng.choice(apex_pool))
+        j = int(rng.integers(0, n_pts))
+        if ys_f[i] == ys_f[j]:
+            continue
+        cm = (xs_f[j] - xs_f[i]) / (ys_f[j] - ys_f[i])
+        cb = xs_f[i] - cm * ys_f[i]
+        # Belt-and-braces: still bound the apex intercept to the cone (cheap
+        # to check, catches the rare case where the apex-pool point itself
+        # sits at the edge of the search range away from anchor_x).
+        if abs(cb - anchor_x) > max_dx + p.ransac_corridor_px:
+            continue
+        # Corridor inlier count: perpendicular-ish distance approximated as
+        # horizontal offset at each pixel's own y (cheap, and exact for the
+        # near-vertical lines this method is restricted to).
+        pred_x = cm * ys_f + cb
+        n_in = int((np.abs(xs_f - pred_x) <= p.ransac_corridor_px).sum())
+        if n_in > best_n:
+            best_n = n_in
+            best_m, best_b = float(cm), float(cb)
+
+    if best_n < p.ransac_min_inliers:
+        return None
+
+    # Polish: refit by ordinary least squares over the winning inlier set
+    # only, so the final line isn't just one of the two seed pixels' exact
+    # line but the best fit through all pixels RANSAC identified as inliers.
+    pred_x = best_m * ys_f + best_b
+    inliers = np.abs(xs_f - pred_x) <= p.ransac_corridor_px
+    yin = ys_f[inliers]
+    xin = xs_f[inliers]
+    if yin.size >= 2 and np.ptp(yin) > 1e-6:
+        m_fit, b_fit = np.polyfit(yin, xin, 1)
+        return (float(m_fit), float(b_fit), int(inliers.sum()))
+    return (best_m, best_b, int(inliers.sum()))
+
+
 def _detect_from_mask01(mask01: np.ndarray,
                         p: TSMParams,
                         prev_anchor: Optional[int] = None) -> TSMResult:
@@ -309,11 +450,41 @@ def _detect_from_mask01(mask01: np.ndarray,
 
     Used by detect_central_row and detect_rows_multi to avoid redundant mask
     normalisation when running multiple bands on the same frame.
+
+    anchor_scan always runs first regardless of p.fit_mode: it establishes
+    whether the band has a valid row at all, and the anchor_x used for
+    row-swap debounce / sticky tracking / multi-row band bookkeeping
+    upstream. fit_mode only changes how the LINE through that band is
+    computed once anchor_scan has confirmed a row is present:
+      "tsm" (default) — line_scan's single free-endpoint argmax (unchanged).
+      "ransac"         — ransac_line_fit over raw mask pixels in the same
+                          band, falling back to the "tsm" line if support is
+                          too thin (sparse mask, end-of-row, etc.).
     """
-    h_img, _ = mask01.shape
+    h_img, w_img = mask01.shape
     ax = anchor_scan(mask01, p, prev_anchor)
     if ax is None:
         return TSMResult((0, 0), (0, 0), 0.0, 0.0, 0.0, False)
+
+    if p.fit_mode == "ransac":
+        amin = int(round(p.amin_frac * w_img))
+        amax = int(round(p.amax_frac * w_img))
+        fit = ransac_line_fit(mask01, p, ax, amin, amax)
+        if fit is not None:
+            m, b, _n_in = fit
+            denom = float(h_img - 1) if h_img > 1 else 1.0
+            px = b + m * denom
+            return TSMResult(
+                anchor_xy=(int(round(b)), 0),
+                base_xy=(int(round(px)), h_img - 1),
+                slope=m,
+                intercept=b,
+                bottom_x=float(px),
+                valid=True,
+            )
+        # Too few inliers (sparse mask, end-of-row, etc.) — fall through to
+        # the tsm line_scan below rather than returning invalid.
+
     px = line_scan(mask01, ax, p)
     denom = float(h_img - 1) if h_img > 1 else 1.0
     m = (px - ax) / denom
@@ -326,6 +497,7 @@ def _detect_from_mask01(mask01: np.ndarray,
         bottom_x=float(px),
         valid=True,
     )
+
 
 
 def detect_central_row(mask: np.ndarray,
