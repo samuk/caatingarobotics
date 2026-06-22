@@ -170,7 +170,38 @@ def visual_servoing_ctl(camera: Camera,
 # ===========================================================================
 # Índice de vegetação ExG + extração de contornos  (de / from imageProc.py — BSD-2)
 # ===========================================================================
-def compute_exg_mask(bgr_img: np.ndarray):
+def compute_exg_mask(bgr_img: np.ndarray, close_kernel: int = 21):
+    """ExG + Otsu vegetation mask.
+
+    close_kernel (engineering addition, NOT in the original imageProc.py):
+    a morphological CLOSE pass (dilate-then-erode) applied after the
+    existing dilate step, to reconnect fragments of the SAME plant that the
+    binary threshold splits apart — leaf-vein shadow, partial occlusion, or
+    canopy texture can break one physical plant into several disconnected
+    blobs. Without this, get_plant_centers() returns one centroid per
+    fragment instead of one per plant: a large/textured plant ends up with
+    several scattered dots near its edges instead of one dot near its
+    centre, while a uniform small plant (one solid blob already) is
+    unaffected and still gets exactly one dot.
+
+    Unlike plain dilate (which only grows the mask and never shrinks it
+    back), CLOSE dilates then erodes by the same amount — small gaps between
+    nearby fragments get bridged, but the mask's outer boundary returns
+    close to its original extent rather than growing every frame.
+
+    close_kernel trades off two failure modes and has no value that is safe
+    for every gap size:
+      too small — leaves intra-plant fragments unmerged (the bug above).
+      too large — bridges the gap between two DISTINCT neighbouring plants,
+                  silently merging them into one false centroid.
+    21 was chosen empirically (see triangle_scan fit-mode test harness notes)
+    as large enough to close typical leaf-vein/shadow gaps (validated up to
+    ~25px gaps) while requiring an edge-to-edge plant spacing below ~25-30px
+    before two real plants would merge — narrower than any reasonable
+    in-row lettuce spacing at this camera's working distance. Re-validate
+    against your own field footage if camera height/FOV changes
+    significantly. Set to 0 to disable and get the original dilate-only mask.
+    """
     img = bgr_img.astype("int32")
     b, g, r = img[:, :, 0], img[:, :, 1], img[:, :, 2]
     exg = 2 * g - r - b
@@ -180,6 +211,9 @@ def compute_exg_mask(bgr_img: np.ndarray):
     _, mask = cv.threshold(blur, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
     kernel = np.ones((10, 10), np.uint8)
     mask = cv.dilate(mask, kernel, iterations=1)
+    if close_kernel and close_kernel > 0:
+        ck = np.ones((close_kernel, close_kernel), np.uint8)
+        mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, ck)
     return mask
 
 
@@ -298,6 +332,7 @@ class CropRowNode(Node):
         self.declare_parameter("n_scan_windows", 8)
         self.declare_parameter("window_width", 80)
         self.declare_parameter("min_contour_area", 10.0)
+        self.declare_parameter("plant_close_kernel", 21)
         self.declare_parameter("camera_height_m", 1.2)
         self.declare_parameter("camera_tilt_deg", -80.0)
         self.declare_parameter("linear_vel", 0.15)
@@ -337,6 +372,7 @@ class CropRowNode(Node):
         self.n_windows: int      = p("n_scan_windows").value
         self.win_w: int          = p("window_width").value
         self.min_area: float     = p("min_contour_area").value
+        self.plant_close_kernel: int = p("plant_close_kernel").value
         self.linear_vel: float   = p("linear_vel").value
         self.omega_scaler: float = p("omega_scaler").value
         self.max_omega: float    = p("max_omega").value
@@ -536,7 +572,7 @@ class CropRowNode(Node):
         if w != self.img_w or h != self.img_h:
             bgr = cv.resize(bgr, (self.img_w, self.img_h))
 
-        mask = compute_exg_mask(bgr)
+        mask = compute_exg_mask(bgr, close_kernel=self.plant_close_kernel)
         centers = get_plant_centers(mask, self.min_area)
 
         held = False
