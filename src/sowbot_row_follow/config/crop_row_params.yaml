@@ -41,6 +41,20 @@ crop_row_node:
     # but gives a cleaner plant-centre visualisation for tuning.
     min_contour_area: 40.0     # Min contour area (px²). Increase to filter soil noise.
 
+    # Morphological CLOSE kernel (px) applied after ExG+Otsu thresholding,
+    # before contour/centroid extraction. Reconnects fragments of the SAME
+    # plant that the binary mask splits apart (leaf-vein shadow, canopy
+    # texture) — without this a single large/textured plant can produce
+    # several scattered dots near its edges instead of one dot near its
+    # centre. Trade-off: too large bridges the gap between two DISTINCT
+    # neighbouring plants and merges them into one false centroid. Default
+    # 21 was validated to merge real fragments up to ~25px gaps while still
+    # keeping two separate plants apart down to ~30px edge-to-edge spacing
+    # (640x480 frame, BonnBot-default camera geometry). Re-tune by watching
+    # debug_image_topic: scattered dots around one plant -> increase; two
+    # adjacent plants showing one dot -> decrease. Set to 0 to disable.
+    plant_close_kernel: 21
+
     # -------------------------------------------------------------------------
     # Velocity — start conservative, increase only once row-following is stable
     # -------------------------------------------------------------------------
