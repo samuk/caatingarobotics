@@ -217,16 +217,39 @@ def compute_exg_mask(bgr_img: np.ndarray, close_kernel: int = 21):
     return mask
 
 
-def get_plant_centers(mask: np.ndarray, min_area: float) -> np.ndarray:
-    contours, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    centers = []
-    for c in contours:
-        if cv.contourArea(c) >= min_area:
-            M = cv.moments(c)
-            if M["m00"] > 0:
-                centers.append((int(M["m10"] / M["m00"]),
-                                 int(M["m01"] / M["m00"])))
-    return np.array(centers) if centers else np.empty((0, 2), dtype=int)
+def get_plant_centers(mask: np.ndarray, min_area: float,
+                      neighborhood_px: int = 30,
+                      min_dist_px: float = 10.0) -> np.ndarray:
+    """Find plant centres via distance-transform local maxima.
+
+    The previous contour-centroid approach broke on dense lettuce rows: the
+    10 px dilation + 21 px close in compute_exg_mask merges all plants in a
+    row into one connected blob, so findContours returned one centroid for the
+    whole row instead of one per plant.
+
+    The distance transform assigns each foreground pixel its distance to the
+    nearest background edge.  Local maxima of that field are maximally-interior
+    points — one per convex lobe, i.e. one per plant even when several plants
+    have merged.  A non-maximum suppression radius of ``neighborhood_px``
+    prevents multiple peaks from the same plant.
+
+    ``min_dist_px``  — reject artefacts at blob edges (noise pixels whose
+    distance value is tiny).  ~half the dilation kernel radius works well.
+
+    ``min_area``  — kept for API compatibility; ignored in this implementation.
+
+    Uses only OpenCV (no scipy): cv.dilate on a float32 image computes the
+    local maximum in each neighbourhood window, equivalent to
+    scipy.ndimage.maximum_filter.
+    """
+    dist = cv.distanceTransform(mask, cv.DIST_L2, 5)
+    nb = int(neighborhood_px) * 2 + 1
+    dilated = cv.dilate(dist, np.ones((nb, nb), np.float32))
+    local_max = (dist >= dilated - 0.5) & (dist > min_dist_px)
+    ys, xs = np.nonzero(local_max)
+    if xs.size == 0:
+        return np.empty((0, 2), dtype=int)
+    return np.stack([xs, ys], axis=1).astype(int)
 
 
 # ===========================================================================
@@ -333,6 +356,8 @@ class CropRowNode(Node):
         self.declare_parameter("window_width", 80)
         self.declare_parameter("min_contour_area", 10.0)
         self.declare_parameter("plant_close_kernel", 21)
+        self.declare_parameter("plant_detect_neighborhood_px", 30)
+        self.declare_parameter("plant_detect_min_dist_px", 10.0)
         self.declare_parameter("camera_height_m", 1.2)
         self.declare_parameter("camera_tilt_deg", -80.0)
         self.declare_parameter("linear_vel", 0.15)
@@ -373,6 +398,8 @@ class CropRowNode(Node):
         self.win_w: int          = p("window_width").value
         self.min_area: float     = p("min_contour_area").value
         self.plant_close_kernel: int = p("plant_close_kernel").value
+        self.plant_neighborhood_px: int   = int(p("plant_detect_neighborhood_px").value)
+        self.plant_min_dist_px: float     = float(p("plant_detect_min_dist_px").value)
         self.linear_vel: float   = p("linear_vel").value
         self.omega_scaler: float = p("omega_scaler").value
         self.max_omega: float    = p("max_omega").value
@@ -573,7 +600,9 @@ class CropRowNode(Node):
             bgr = cv.resize(bgr, (self.img_w, self.img_h))
 
         mask = compute_exg_mask(bgr, close_kernel=self.plant_close_kernel)
-        centers = get_plant_centers(mask, self.min_area)
+        centers = get_plant_centers(mask, self.min_area,
+                                          neighborhood_px=self.plant_neighborhood_px,
+                                          min_dist_px=self.plant_min_dist_px)
 
         held = False
         swap_remaining_s = 0.0
