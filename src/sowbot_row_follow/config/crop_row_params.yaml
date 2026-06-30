@@ -97,15 +97,14 @@ crop_row_node:
     tsm_s: 0.2                 # anchor ROI height fraction (h = s*H); strip = 96px at 480p
 
     # Search range for the anchor scan, shared across all band slots.
-    # With tsm_n_rows=2, this range is split into two equal bands:
-    #   left  band: cols  64–304  (amin_frac .. midpoint)
-    #   right band: cols 304–544  (midpoint  .. amax_frac)
-    # Each band is 240px wide — raised from the previous 160px so sparse
-    # end-of-bed frames have more column coverage and a more stable column sum.
-    # If a row appears outside this range it will not be detected; widen further
-    # if the camera field of view shows rows near the image edges.
-    tsm_amin_frac: 0.1         # anchor column search start (fraction of width)
-    tsm_amax_frac: 0.85        # anchor column search end (fraction of width)
+    # Narrowed to a band centred on the image (was 0.1-0.85, which let the
+    # anchor lock onto a neighbouring row off to the side). For single-row
+    # "follow what's directly ahead" behaviour the anchor MUST be restricted
+    # to a corridor around the robot's centreline — widen only if the centre
+    # crop row sometimes falls outside this range in debug_image (e.g. on
+    # sharp re-acquire after a turn).
+    tsm_amin_frac: 0.35        # anchor column search start (fraction of width)
+    tsm_amax_frac: 0.65        # anchor column search end (fraction of width)
 
     tsm_b_frac: 0.0            # line-scan Begin point x (fraction of width)
     tsm_c_frac: 1.0            # line-scan Cease point x (fraction of width)
@@ -152,7 +151,7 @@ crop_row_node:
     # leftmost_peak as a tie-breaker for the left band when two sub-peaks exist.
     #   argmax (default) | leftmost_peak | rightmost_peak | spatial_prior | weighted
     # For a hard restriction, narrow tsm_amin_frac/tsm_amax_frac instead.
-    tsm_anchor_select: "leftmost_peak"   # PREFER LEFT (was OK in field)
+    tsm_anchor_select: "argmax"   # no side bias — strongest column wins (was leftmost_peak)
     tsm_peak_rel_thresh: 0.6   # leftmost/rightmost_peak: peak >= frac of global max
     tsm_prior_lambda: 0.01     # spatial_prior: distance penalty (px^-1)
     tsm_prior_init_frac: 0.3   # spatial_prior: first-frame seed (frac of width)
