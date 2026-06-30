@@ -27,9 +27,20 @@ crop_row_node:
     image_width: 640
     image_height: 480
 
-    # BonnBot defaults shown. Replace with Sowbot measurements.
-    camera_height_m: 1.2       # TODO: tape measure from lens to soil surface (m)
-    camera_tilt_deg: -80.0     # TODO: tilt from horizontal, downward = negative (deg)
+    # Derived from ifarmate.urdf.xacro (camera_joint + Gazebo <sensor> pose),
+    # not measured by hand — these are exact given the xacro's own values:
+    #   cam_mount_z = (cam_zone_bottom + cam_zone_top) / 2
+    #               = (0.86 + 1.25) / 2 = 1.055 m above ground
+    #   <pose>0 0 0 0 0.35 0</pose> -> pitch 0.35 rad = 20.0 deg downward
+    #     (xacro's own comment: "Pitched down 20°"; node convention is
+    #     downward = negative, per the docstring above)
+    # Replaces unconfirmed BonnBot placeholders (1.2 m, -80 deg) that were
+    # never updated for Sowbot/ifarmate — -80 deg is nearly straight down,
+    # wildly different from the camera's actual shallow 20 deg tilt, and
+    # was very likely corrupting the visual-servo steering output even
+    # while TSM detection itself looked reasonable in debug_image.
+    camera_height_m: 1.055     # from ifarmate.urdf.xacro cam_mount_z
+    camera_tilt_deg: -20.0     # from ifarmate.urdf.xacro sensor pitch (0.35 rad)
 
     # -------------------------------------------------------------------------
     # Detection tuning — adjust while watching debug_image_topic in Foxglove
