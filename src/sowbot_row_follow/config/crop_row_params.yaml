@@ -178,7 +178,18 @@ crop_row_node:
     # Set 0.0 to disable (allow any angle). The code default is 15.0, so this
     # line MUST be present and set to 0.0 to keep the clamp off — deleting it
     # would silently re-enable a 15° clamp at next launch.
-    tsm_max_angle_deg: 15.0     # disabled — 15deg clamp made row-following worse
+    # Evidence from debug_image (frames showing the cone boundary): the
+    # fitted line was pinned right against the 15deg edge, not floating
+    # freely inside it — meaning the true row angle exceeds 15deg off
+    # vertical whenever the robot's heading isn't perfectly parallel to the
+    # bed, and the clamp was clipping the fit short of the real row line
+    # rather than rejecting noise. Raised to 30deg to give the line scan
+    # room to follow the actual row geometry during normal heading
+    # correction. If this reintroduces the earlier "made it worse" failure
+    # mode (line snapping to a diagonal through unrelated weed clutter),
+    # the fix is tightening the anchor band further or raising
+    # tsm_anchor_min_sum, not re-clamping the angle.
+    tsm_max_angle_deg: 30.0
 
     # -------------------------------------------------------------------------
     # TSM row-swap hold — bridge germination gaps on the preferred (left) row.
