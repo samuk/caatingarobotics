@@ -94,7 +94,12 @@ crop_row_node:
     # launch file overrides 'detector'. TSM tunables (640x480 frame values):
     # -------------------------------------------------------------------------
     detector: "scanwin"        # overridden by launch; do not rely on this value
-    tsm_s: 0.2                 # anchor ROI height fraction (h = s*H); strip = 96px at 480p
+    # Raised from 0.2: the original strip sat almost entirely in the
+    # perspective-compressed band near the horizon, where adjacent rows are
+    # closest together and hardest to disambiguate by column-sum. Extending
+    # the strip further down the frame includes the part of the row where
+    # separation from its neighbours is actually wide enough to trust.
+    tsm_s: 0.32                # anchor ROI height fraction (h = s*H)
 
     # Search range for the anchor scan, shared across all band slots.
     # Narrowed to a band centred on the image (was 0.1-0.85, which let the
@@ -103,8 +108,8 @@ crop_row_node:
     # to a corridor around the robot's centreline — widen only if the centre
     # crop row sometimes falls outside this range in debug_image (e.g. on
     # sharp re-acquire after a turn).
-    tsm_amin_frac: 0.3        # anchor column search start (fraction of width)
-    tsm_amax_frac: 0.7        # anchor column search end (fraction of width)
+    tsm_amin_frac: 0.4         # anchor column search start (fraction of width)
+    tsm_amax_frac: 0.6         # anchor column search end (fraction of width)
 
     tsm_b_frac: 0.0            # line-scan Begin point x (fraction of width)
     tsm_c_frac: 1.0            # line-scan Cease point x (fraction of width)
@@ -163,7 +168,7 @@ crop_row_node:
     # row's mass advantage at typical inter-row pixel spacing. If it still
     # jumps rows in debug_image, raise further (0.05+); if it feels too
     # sticky to correct heading drift, lower it.
-    tsm_prior_lambda: 0.03     # spatial_prior: distance penalty (px^-1)
+    tsm_prior_lambda: 0.05     # spatial_prior: distance penalty (px^-1)
     tsm_prior_init_frac: 0.5   # spatial_prior: first-frame seed — image centre
     tsm_weight_k: 0.5          # weighted: bias strength
     tsm_weight_side: "left"    # weighted: preferred side
