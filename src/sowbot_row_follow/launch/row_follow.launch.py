@@ -17,13 +17,6 @@ def generate_launch_description():
             output="screen",
             parameters=[
                 params_file,
-                {
-                    "row_follow_handover_distance": 1.0,
-                    "heartbeat_timeout_s": 3.0,
-                    "enable_service_timeout_s": 2.0,
-                    "monitor_rate_hz": 10.0,
-                },
             ],
         ),
     ])
-
