@@ -373,11 +373,11 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_c_frac", 1.0)
         self.declare_parameter("tsm_anchor_min_sum", 1.0)
         self.declare_parameter("tsm_morph_kernel", 5)
-        self.declare_parameter("tsm_anchor_select", "argmax")
+        self.declare_parameter("tsm_anchor_select", "spatial_prior")
         self.declare_parameter("tsm_peak_rel_thresh", 0.6)
         self.declare_parameter("tsm_prior_lambda", 0.01)
-        self.declare_parameter("tsm_prior_init_frac", 0.3)
-        self.declare_parameter("tsm_weight_k", 0.5)
+        self.declare_parameter("tsm_prior_init_frac", 0.5)
+        self.declare_parameter("tsm_weight_k", 0.0)
         self.declare_parameter("tsm_weight_side", "left")
         self.declare_parameter("tsm_max_angle_deg", 15.0)
         self.declare_parameter("tsm_fit_mode", "tsm")           # "tsm" | "ransac"
@@ -643,9 +643,15 @@ class CropRowNode(Node):
                 ]
                 if detected_rows:
                     n_valid = len(detected_rows)
-                    avg_bx = float(np.mean([r[0] for r in detected_rows]))
-                    avg_m  = float(np.mean([r[1] for r in detected_rows]))
-                    avg_b  = float(np.mean([r[2] for r in detected_rows]))
+                    # Prefer the row ahead: pick the single detected row whose
+                    # bottom_x is closest to image centre as the heading source,
+                    # instead of an unweighted mean across all bands. A noisy or
+                    # partially-occluded flanking band previously voted equally
+                    # with a clean centred one, dragging heading toward whichever
+                    # side had the worse fit.
+                    cx = self.img_w / 2.0
+                    avg_bx, avg_m, avg_b = min(
+                        detected_rows, key=lambda r: abs(r[0] - cx))
 
                     if n_valid == self.tsm_n_rows:
                         # All bands valid: update observed inter-row spacing.
