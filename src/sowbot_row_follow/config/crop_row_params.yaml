@@ -39,8 +39,8 @@ crop_row_node:
     # wildly different from the camera's actual shallow 20 deg tilt, and
     # was very likely corrupting the visual-servo steering output even
     # while TSM detection itself looked reasonable in debug_image.
-    camera_height_m: 0.80     # from ifarmate.urdf.xacro cam_mount_z
-    camera_tilt_deg: -35.0     # from ifarmate.urdf.xacro sensor pitch (0.35 rad) the more negative the number, the more downward the tilt, and the less horizon in frame.
+    camera_height_m: 1.055     # from ifarmate.urdf.xacro cam_mount_z
+    camera_tilt_deg: -20.0     # from ifarmate.urdf.xacro sensor pitch (0.35 rad)
 
     # -------------------------------------------------------------------------
     # Detection tuning — adjust while watching debug_image_topic in Foxglove
@@ -71,13 +71,13 @@ crop_row_node:
     #   well below typical in-row lettuce spacing (~20 cm → ~100 px).
     #   Reduce if two nearby plants produce one merged dot; increase if one
     #   large plant produces multiple dots.
-    plant_detect_neighborhood_px: 30
+    plant_detect_neighborhood_px: 18
 
     # plant_detect_min_dist_px — minimum distance-transform value to count
     #   as a valid peak.  Rejects single-pixel noise and edge artefacts whose
     #   distance value is very small.  ~half the dilation kernel radius (5 for
     #   a 10 px kernel) leaves real plant interiors well above the threshold.
-    plant_detect_min_dist_px: 10.0
+    plant_detect_min_dist_px: 6.0
 
     # -------------------------------------------------------------------------
     # Velocity — start conservative, increase only once row-following is stable
@@ -201,6 +201,20 @@ crop_row_node:
     # the fix is tightening the anchor band further or raising
     # tsm_anchor_min_sum, not re-clamping the angle.
     tsm_max_angle_deg: 30.0
+
+    # Fit mode — "tsm" (paper-faithful: fixed apex + single free endpoint,
+    # current default/behaviour) or "ransac" (fits directly on mask pixels,
+    # scored by inlier count in a narrow corridor around each candidate line
+    # — clutter spatially separated from the true row contributes nothing,
+    # unlike the "tsm" mode where the free endpoint can be pulled toward a
+    # dense weed patch even if it's off to the side). Worth trying if
+    # debug_image shows the fitted line cutting through weed/soil clutter
+    # rather than following the actual crop row.
+    tsm_fit_mode: "tsm"
+    tsm_ransac_iters: 60             # random 2-pixel candidate lines to try
+    tsm_ransac_corridor_px: 6.0      # inlier band half-width (px)
+    tsm_ransac_min_inliers: 30       # min inliers to trust the fit
+    tsm_ransac_max_points: 2000      # subsample mask pixels above this (speed)
 
     # -------------------------------------------------------------------------
     # TSM row-swap hold — bridge germination gaps on the preferred (left) row.
