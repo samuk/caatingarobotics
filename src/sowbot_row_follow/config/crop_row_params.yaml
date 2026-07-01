@@ -241,7 +241,7 @@ limbic_row_follow:
   ros__parameters:
 
     # Distance at which Phase 1 (visual servo) hands over to Phase 2 (nav2).
-    row_follow_handover_distance: 1.0  # metres
+    row_follow_handover_distance: 2.5  # metres
 
     # Time without a True heartbeat on /aoc/heartbeat/neo_vision before
     # Phase 1 is aborted and Neo is disabled. Should be longer than
