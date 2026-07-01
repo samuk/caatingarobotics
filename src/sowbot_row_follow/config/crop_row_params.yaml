@@ -39,8 +39,8 @@ crop_row_node:
     # wildly different from the camera's actual shallow 20 deg tilt, and
     # was very likely corrupting the visual-servo steering output even
     # while TSM detection itself looked reasonable in debug_image.
-    camera_height_m: 1.055     # from ifarmate.urdf.xacro cam_mount_z
-    camera_tilt_deg: -20.0     # from ifarmate.urdf.xacro sensor pitch (0.35 rad)
+    camera_height_m: 0.80     # from ifarmate.urdf.xacro cam_mount_z
+    camera_tilt_deg: -35.0     # from ifarmate.urdf.xacro sensor pitch (0.35 rad) the more negative the number, the more downward the tilt, and the less horizon in frame.
 
     # -------------------------------------------------------------------------
     # Detection tuning — adjust while watching debug_image_topic in Foxglove
