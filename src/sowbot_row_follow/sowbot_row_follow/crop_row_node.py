@@ -358,8 +358,8 @@ class CropRowNode(Node):
         self.declare_parameter("plant_close_kernel", 21)
         self.declare_parameter("plant_detect_neighborhood_px", 30)
         self.declare_parameter("plant_detect_min_dist_px", 10.0)
-        self.declare_parameter("camera_height_m", 1.2)
-        self.declare_parameter("camera_tilt_deg", -80.0)
+        self.declare_parameter("camera_height_m", 1.055)   # ifarmate cam_mount_z
+        self.declare_parameter("camera_tilt_deg", -20.0)   # ifarmate sensor pitch (0.35 rad)
         self.declare_parameter("linear_vel", 0.15)
         self.declare_parameter("omega_scaler", 0.1)
         self.declare_parameter("max_omega", 0.4)
@@ -380,6 +380,11 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_weight_k", 0.5)
         self.declare_parameter("tsm_weight_side", "left")
         self.declare_parameter("tsm_max_angle_deg", 15.0)
+        self.declare_parameter("tsm_fit_mode", "tsm")           # "tsm" | "ransac"
+        self.declare_parameter("tsm_ransac_iters", 60)
+        self.declare_parameter("tsm_ransac_corridor_px", 6.0)
+        self.declare_parameter("tsm_ransac_min_inliers", 30)
+        self.declare_parameter("tsm_ransac_max_points", 2000)
         self.declare_parameter("tsm_n_rows", 1)
         self.declare_parameter("tsm_filter_enable", True)
         self.declare_parameter("tsm_filter_alpha", 0.4)
@@ -430,6 +435,11 @@ class CropRowNode(Node):
                 weight_k=p("tsm_weight_k").value,
                 weight_side=str(p("tsm_weight_side").value),
                 max_angle_deg=p("tsm_max_angle_deg").value,
+                fit_mode=str(p("tsm_fit_mode").value),
+                ransac_iters=int(p("tsm_ransac_iters").value),
+                ransac_corridor_px=p("tsm_ransac_corridor_px").value,
+                ransac_min_inliers=int(p("tsm_ransac_min_inliers").value),
+                ransac_max_points=int(p("tsm_ransac_max_points").value),
             )
             _fp = TSMFilterParams(
                 enable=p("tsm_filter_enable").value,
