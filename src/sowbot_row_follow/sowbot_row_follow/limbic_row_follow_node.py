@@ -83,6 +83,7 @@ class LimbicRowFollow(Node):
         # State
         # ------------------------------------------------------------------
         self._current_odom: Odometry | None = None
+        self._current_raw_odom: Odometry | None = None
         self._last_heartbeat_time: rclpy.time.Time | None = None
         self._heartbeat_alive: bool = False
 
@@ -91,6 +92,14 @@ class LimbicRowFollow(Node):
         # ------------------------------------------------------------------
         self.create_subscription(
             Odometry, "/odometry/global", self._on_odom, 10,
+            callback_group=self._cbg)
+        # Ground-truth odom for the handover-distance check only. Do not
+        # use /odometry/global here: it diverges under skid-steer lateral
+        # velocity during turns, so dist-to-goal can fail to converge and
+        # Phase 1 never breaks — see the handover check below and
+        # navigation2.py's independent _goal_reached signal.
+        self.create_subscription(
+            Odometry, "/odom", self._on_raw_odom, 10,
             callback_group=self._cbg)
         self.create_subscription(
             Bool, "/aoc/heartbeat/neo_vision", self._on_heartbeat, 10,
@@ -137,6 +146,9 @@ class LimbicRowFollow(Node):
 
     def _on_odom(self, msg: Odometry) -> None:
         self._current_odom = msg
+
+    def _on_raw_odom(self, msg: Odometry) -> None:
+        self._current_raw_odom = msg
 
     def _on_heartbeat(self, msg: Bool) -> None:
         self._heartbeat_alive = msg.data
@@ -201,14 +213,25 @@ class LimbicRowFollow(Node):
                 goal_handle.abort()
                 return result
 
-            # Check distance to goal
-            if self._current_odom is not None:
-                robot_pose = PoseStamped()
-                robot_pose.pose = self._current_odom.pose.pose
-                dist = _distance_2d(robot_pose, goal_pose)
+            # Check distance to goal. Uses /odom (ground truth) rather
+            # than /odometry/global (fused): the fused estimate diverges
+            # under skid-steer lateral velocity during turns, which could
+            # keep dist above _handover_dist indefinitely and stall
+            # Phase 1 forever. Feedback still reports the fused pose since
+            # that's what downstream consumers expect.
+            if self._current_raw_odom is not None:
+                raw_pose = PoseStamped()
+                raw_pose.pose = self._current_raw_odom.pose.pose
+                dist = _distance_2d(raw_pose, goal_pose)
+
+                feedback_pose = PoseStamped()
+                if self._current_odom is not None:
+                    feedback_pose.pose = self._current_odom.pose.pose
+                else:
+                    feedback_pose = raw_pose
 
                 goal_handle.publish_feedback(
-                    NavigateToPose.Feedback(current_pose=robot_pose,
+                    NavigateToPose.Feedback(current_pose=feedback_pose,
                                             distance_remaining=dist))
 
                 if dist <= self._handover_dist:
