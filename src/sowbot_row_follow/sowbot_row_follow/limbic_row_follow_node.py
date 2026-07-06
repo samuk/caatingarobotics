@@ -24,6 +24,7 @@
 # enable() service timeout: treated as hard fault — abort immediately.
 
 import math
+import time
 
 import rclpy
 from action_msgs.msg import GoalStatus
@@ -271,7 +272,7 @@ class LimbicRowFollow(Node):
                 self.get_logger().error(
                     "limbic_row_follow: /row_follow/enable timed out")
                 return False
-            rclpy.spin_once(self, timeout_sec=0.05)
+            time.sleep(0.05)
 
         response: SetBool.Response = future.result()
         if not response.success:
@@ -304,8 +305,16 @@ class LimbicRowFollow(Node):
 
         send_future = self._nav2_client.send_goal_async(nav2_goal)
 
-        # Wait for goal acceptance
-        rclpy.spin_until_future_complete(self, send_future)
+        # Wait for goal acceptance (executor is already spinning this node
+        # on other threads via the ReentrantCallbackGroup, so just poll)
+        start = self.get_clock().now()
+        accept_timeout = Duration(seconds=5.0)
+        while not send_future.done():
+            if self.get_clock().now() - start > accept_timeout:
+                self.get_logger().error(
+                    "limbic_row_follow: nav2 goal acceptance timed out")
+                return False
+            time.sleep(0.05)
         nav2_handle = send_future.result()
 
         if not nav2_handle or not nav2_handle.accepted:
@@ -337,7 +346,11 @@ class LimbicRowFollow(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = LimbicRowFollow()
-    executor = rclpy.executors.MultiThreadedExecutor()
+    # Explicit thread count: the sleep-poll loops in _call_enable/_call_nav2
+    # occupy one executor thread each while waiting, so a too-small default
+    # (e.g. num_threads=os.cpu_count() on a low-core SBC) can starve the
+    # thread needed to service the pending future's callback and hang forever.
+    executor = rclpy.executors.MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         executor.spin()
