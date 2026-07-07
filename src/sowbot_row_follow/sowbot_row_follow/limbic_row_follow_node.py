@@ -19,6 +19,15 @@
 # Phase 2: Disable Neo (acknowledged), then hand off to nav2 navigate_to_pose
 #          for precise final approach and heading alignment.
 #
+# Phase 0 (align, runs before Phase 1): topological_navigation's preceding
+# edge only guarantees loose xy/yaw tolerance at the row endpoint (fine for
+# headland travel, not tight enough for TSM line-fitting to find the row on
+# its first frame). Before enabling Neo, rotate in place to face goal_pose
+# (the opposite row endpoint) within row_entry_align_tolerance_deg. Goal_pose
+# is always "the other end of this row" regardless of which direction the
+# edge is traversed, so this is symmetric for both IN->OUT and OUT->IN without
+# needing to know row_id/role — it only uses the goal already passed in.
+#
 # Cancel / abort: Neo is always disabled before the cancel is accepted.
 # Heartbeat loss (>heartbeat_timeout_s): abort with Neo disabled.
 # enable() service timeout: treated as hard fault — abort immediately.
@@ -28,7 +37,7 @@ import time
 
 import rclpy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import Odometry
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
@@ -66,6 +75,10 @@ class LimbicRowFollow(Node):
         self.declare_parameter("heartbeat_timeout_s", 3.0)
         self.declare_parameter("enable_service_timeout_s", 2.0)
         self.declare_parameter("monitor_rate_hz", 10.0)
+        # Phase 0 (align) — see docstring at top and _align_to_goal below.
+        self.declare_parameter("row_entry_align_tolerance_deg", 8.0)
+        self.declare_parameter("row_entry_align_timeout_s", 15.0)
+        self.declare_parameter("row_entry_align_angular_speed", 0.3)
 
         self._handover_dist: float = (
             self.get_parameter("row_follow_handover_distance").value)
@@ -83,7 +96,6 @@ class LimbicRowFollow(Node):
         # State
         # ------------------------------------------------------------------
         self._current_odom: Odometry | None = None
-        self._current_raw_odom: Odometry | None = None
         self._last_heartbeat_time: rclpy.time.Time | None = None
         self._heartbeat_alive: bool = False
 
@@ -92,14 +104,6 @@ class LimbicRowFollow(Node):
         # ------------------------------------------------------------------
         self.create_subscription(
             Odometry, "/odometry/global", self._on_odom, 10,
-            callback_group=self._cbg)
-        # Ground-truth odom for the handover-distance check only. Do not
-        # use /odometry/global here: it diverges under skid-steer lateral
-        # velocity during turns, so dist-to-goal can fail to converge and
-        # Phase 1 never breaks — see the handover check below and
-        # navigation2.py's independent _goal_reached signal.
-        self.create_subscription(
-            Odometry, "/odom", self._on_raw_odom, 10,
             callback_group=self._cbg)
         self.create_subscription(
             Bool, "/aoc/heartbeat/neo_vision", self._on_heartbeat, 10,
@@ -110,6 +114,11 @@ class LimbicRowFollow(Node):
         # ------------------------------------------------------------------
         self._enable_client = self.create_client(
             SetBool, "/row_follow/enable", callback_group=self._cbg)
+
+        # Align-phase (Phase 0) drives directly — safe because Neo/visual
+        # servo is not enabled yet at that point, so there's no conflicting
+        # publisher on this topic during that window.
+        self._cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
         # ------------------------------------------------------------------
         # Nav2 action client — Phase 2 final approach
@@ -147,9 +156,6 @@ class LimbicRowFollow(Node):
     def _on_odom(self, msg: Odometry) -> None:
         self._current_odom = msg
 
-    def _on_raw_odom(self, msg: Odometry) -> None:
-        self._current_raw_odom = msg
-
     def _on_heartbeat(self, msg: Bool) -> None:
         self._heartbeat_alive = msg.data
         if msg.data:
@@ -183,6 +189,11 @@ class LimbicRowFollow(Node):
         goal_pose: PoseStamped = goal_handle.request.pose
         result = NavigateToPose.Result()
 
+        self.get_logger().info("limbic_row_follow: Phase 0 — aligning to row heading")
+        if not self._align_to_goal(goal_handle, goal_pose):
+            # Helper already called abort()/canceled() and zeroed cmd_vel.
+            return result
+
         self.get_logger().info("limbic_row_follow: starting Phase 1 — visual servo")
 
         # ------------------------------------------------------------------
@@ -213,25 +224,14 @@ class LimbicRowFollow(Node):
                 goal_handle.abort()
                 return result
 
-            # Check distance to goal. Uses /odom (ground truth) rather
-            # than /odometry/global (fused): the fused estimate diverges
-            # under skid-steer lateral velocity during turns, which could
-            # keep dist above _handover_dist indefinitely and stall
-            # Phase 1 forever. Feedback still reports the fused pose since
-            # that's what downstream consumers expect.
-            if self._current_raw_odom is not None:
-                raw_pose = PoseStamped()
-                raw_pose.pose = self._current_raw_odom.pose.pose
-                dist = _distance_2d(raw_pose, goal_pose)
-
-                feedback_pose = PoseStamped()
-                if self._current_odom is not None:
-                    feedback_pose.pose = self._current_odom.pose.pose
-                else:
-                    feedback_pose = raw_pose
+            # Check distance to goal
+            if self._current_odom is not None:
+                robot_pose = PoseStamped()
+                robot_pose.pose = self._current_odom.pose.pose
+                dist = _distance_2d(robot_pose, goal_pose)
 
                 goal_handle.publish_feedback(
-                    NavigateToPose.Feedback(current_pose=feedback_pose,
+                    NavigateToPose.Feedback(current_pose=robot_pose,
                                             distance_remaining=dist))
 
                 if dist <= self._handover_dist:
@@ -271,6 +271,101 @@ class LimbicRowFollow(Node):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _current_yaw(self) -> float | None:
+        """Robot yaw (rad) from /odometry/global, or None if no odom yet."""
+        if self._current_odom is None:
+            return None
+        q = self._current_odom.pose.pose.orientation
+        return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                           1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    @staticmethod
+    def _yaw_error(target: float, current: float) -> float:
+        """Signed shortest angular distance target-current, wrapped to [-pi, pi]."""
+        e = target - current
+        return math.atan2(math.sin(e), math.cos(e))
+
+    def _publish_zero_twist(self) -> None:
+        self._cmd_vel_pub.publish(Twist())
+
+    def _align_to_goal(self, goal_handle, goal_pose: PoseStamped) -> bool:
+        """
+        Phase 0: rotate in place to face goal_pose before enabling Neo.
+
+        Safe to drive /cmd_vel directly here — Neo/visual servo has not
+        been enabled yet, so nothing else is publishing on this topic for
+        this goal. Returns True once aligned within tolerance. On
+        cancel/timeout/no-odom it calls the appropriate terminal
+        goal_handle method itself (mirroring the Phase 1/2 pattern) and
+        returns False — callers should just `return result` in that case.
+        """
+        tol = math.radians(
+            self.get_parameter("row_entry_align_tolerance_deg").value)
+        timeout_s = self.get_parameter("row_entry_align_timeout_s").value
+        ang_speed = self.get_parameter("row_entry_align_angular_speed").value
+
+        # Wait briefly for odom if the action started before any arrived.
+        wait_start = self.get_clock().now()
+        wait_timeout = Duration(seconds=5.0)
+        while self._current_odom is None and rclpy.ok():
+            if self.get_clock().now() - wait_start > wait_timeout:
+                self.get_logger().error(
+                    "limbic_row_follow: no odom before align phase — aborting")
+                goal_handle.abort()
+                return False
+            time.sleep(0.05)
+
+        cur = self._current_odom.pose.pose.position
+        dx = goal_pose.pose.position.x - cur.x
+        dy = goal_pose.pose.position.y - cur.y
+        if math.hypot(dx, dy) < 1e-3:
+            # Already essentially at the goal position — nothing meaningful
+            # to align to (shouldn't normally happen for a row edge).
+            return True
+        target_yaw = math.atan2(dy, dx)
+
+        rate = self.create_rate(self.get_parameter("monitor_rate_hz").value)
+        align_start = self.get_clock().now()
+        align_timeout = Duration(seconds=timeout_s)
+
+        while rclpy.ok():
+            if goal_handle.is_cancel_requested:
+                self.get_logger().info(
+                    "limbic_row_follow: cancel received during Phase 0")
+                self._publish_zero_twist()
+                goal_handle.canceled()
+                return False
+
+            yaw = self._current_yaw()
+            if yaw is None:
+                self._publish_zero_twist()
+                goal_handle.abort()
+                return False
+
+            err = self._yaw_error(target_yaw, yaw)
+            if abs(err) <= tol:
+                self._publish_zero_twist()
+                self.get_logger().info(
+                    "limbic_row_follow: aligned (err=%.1f deg)"
+                    % math.degrees(err))
+                return True
+
+            if self.get_clock().now() - align_start > align_timeout:
+                self.get_logger().error(
+                    "limbic_row_follow: align phase timed out "
+                    "(err=%.1f deg) — aborting" % math.degrees(err))
+                self._publish_zero_twist()
+                goal_handle.abort()
+                return False
+
+            twist = Twist()
+            twist.angular.z = math.copysign(ang_speed, err)
+            self._cmd_vel_pub.publish(twist)
+            rate.sleep()
+
+        self._publish_zero_twist()
+        return False
 
     def _call_enable(self, enable: bool) -> bool:
         """
