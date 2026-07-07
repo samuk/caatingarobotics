@@ -139,3 +139,14 @@ limbic_row_follow:
     heartbeat_timeout_s: 6.0
     enable_service_timeout_s: 4.0
     monitor_rate_hz: 10.0
+
+    # -------------------------------------------------------------------------
+    # Phase 0 (align) — see limbic_row_follow_node.py docstring
+    # -------------------------------------------------------------------------
+    # Headland nav_to_pose edges only guarantee loose xy/yaw tolerance at a
+    # row endpoint — fine for headland travel, not tight enough for TSM to
+    # find the row on its first frame (tsm_max_angle_deg above is 30, so
+    # 8 deg leaves comfortable margin without a slow in-place spin).
+    row_entry_align_tolerance_deg: 8.0
+    row_entry_align_timeout_s: 15.0
+    row_entry_align_angular_speed: 0.3   # rad/s, in-place rotation speed
