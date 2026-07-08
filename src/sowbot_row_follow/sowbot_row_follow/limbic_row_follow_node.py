@@ -294,6 +294,18 @@ class LimbicRowFollow(Node):
     # Helpers
     # ------------------------------------------------------------------
 
+    # Matches ui_node.py's _TF_STALENESS_LIMIT — map->base_link older than
+    # this is not trustworthy enough to align against. Without this check,
+    # lookup_transform(..., Time()) silently returns whatever the LATEST
+    # available transform is, which during a transient (just arrived via
+    # headland nav, FusionCore's covariance-gated fusion hasn't caught up
+    # yet) can be a few seconds old. Phase 0 was computing a "correction"
+    # against that stale heading and spinning the robot to match a target
+    # that no longer reflected reality by the time it acted — this is what
+    # caused the robot to visibly misalign despite already being correctly
+    # aligned with the row.
+    _TF_STALENESS_LIMIT_S = 1.0
+
     def _pose_in_frame(self, frame_id: str) -> tuple | None:
         """(x, y, yaw) of base_link in `frame_id` via TF, or None if
         unavailable/stale. `frame_id` should be goal_pose.header.frame_id —
@@ -308,6 +320,15 @@ class LimbicRowFollow(Node):
             self.get_logger().warn(
                 f'_pose_in_frame: TF lookup {frame_id}->base_link failed '
                 f'({type(e).__name__}): {e}')
+            return None
+        stamp = t.header.stamp.sec + t.header.stamp.nanosec * 1e-9
+        now = self.get_clock().now().nanoseconds * 1e-9
+        age = now - stamp
+        if age > self._TF_STALENESS_LIMIT_S:
+            self.get_logger().warn(
+                f'_pose_in_frame: TF {frame_id}->base_link stale by '
+                f'{age:.2f}s (limit {self._TF_STALENESS_LIMIT_S}s) — '
+                f'refusing to align against it')
             return None
         p, q = t.transform.translation, t.transform.rotation
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
@@ -385,9 +406,18 @@ class LimbicRowFollow(Node):
 
             pose = self._pose_in_frame(goal_frame)
             if pose is None:
+                # Transient staleness/lookup miss — don't hard-abort on a
+                # single bad sample (that's what align_timeout below is
+                # for). Zero cmd_vel for this tick and try again next.
                 self._publish_zero_twist()
-                goal_handle.abort()
-                return False
+                if self.get_clock().now() - align_start > align_timeout:
+                    self.get_logger().error(
+                        "limbic_row_follow: align phase timed out "
+                        "(no valid TF) — aborting")
+                    goal_handle.abort()
+                    return False
+                rate.sleep()
+                continue
             _px, _py, yaw = pose
 
             err = self._yaw_error(target_yaw, yaw)
