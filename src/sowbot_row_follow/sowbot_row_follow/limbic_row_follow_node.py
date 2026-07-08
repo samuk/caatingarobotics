@@ -44,8 +44,12 @@ from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalRespons
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.time import Time
 from std_msgs.msg import Bool
 from std_srvs.srv import SetBool
+from tf2_ros import ConnectivityException, ExtrapolationException, LookupException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +95,17 @@ class LimbicRowFollow(Node):
         # ReentrantCallbackGroup allows the monitor timer to fire while the
         # action callback is awaiting a service or sub-action future.
         self._cbg = ReentrantCallbackGroup()
+
+        # ------------------------------------------------------------------
+        # TF — goal_pose arrives in map frame (topological_navigation), but
+        # /odometry/global is in odom frame (fusioncore's odom_frame param).
+        # Mixing raw odom position with a map-frame goal for bearing/distance
+        # math is WRONG by the static map->odom offset (spawn pose) — mirrors
+        # the same bug ui_node.py's _robot_pose() already had to work around.
+        # Use a real TF lookup for anything compared against goal_pose.
+        # ------------------------------------------------------------------
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
 
         # ------------------------------------------------------------------
         # State
@@ -224,10 +239,17 @@ class LimbicRowFollow(Node):
                 goal_handle.abort()
                 return result
 
-            # Check distance to goal
-            if self._current_odom is not None:
+            # Check distance to goal — must be in goal_pose's frame (map),
+            # NOT raw /odometry/global (odom frame). See TF comment in
+            # __init__: mixing the two silently corrupts this by the static
+            # map->odom offset, same bug Phase 0 alignment had.
+            tf_pose = self._pose_in_frame(goal_pose.header.frame_id)
+            if tf_pose is not None:
+                px, py, _pyaw = tf_pose
                 robot_pose = PoseStamped()
-                robot_pose.pose = self._current_odom.pose.pose
+                robot_pose.header.frame_id = goal_pose.header.frame_id
+                robot_pose.pose.position.x = px
+                robot_pose.pose.position.y = py
                 dist = _distance_2d(robot_pose, goal_pose)
 
                 goal_handle.publish_feedback(
@@ -272,13 +294,25 @@ class LimbicRowFollow(Node):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _current_yaw(self) -> float | None:
-        """Robot yaw (rad) from /odometry/global, or None if no odom yet."""
-        if self._current_odom is None:
+    def _pose_in_frame(self, frame_id: str) -> tuple | None:
+        """(x, y, yaw) of base_link in `frame_id` via TF, or None if
+        unavailable/stale. `frame_id` should be goal_pose.header.frame_id —
+        this is what must be used for anything compared against goal_pose,
+        NOT self._current_odom's raw position (odom frame — see TF comment
+        in __init__). Falls back to 'map' if goal_pose didn't set a frame.
+        """
+        frame_id = frame_id or 'map'
+        try:
+            t = self._tf_buffer.lookup_transform(frame_id, 'base_link', Time())
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            self.get_logger().warn(
+                f'_pose_in_frame: TF lookup {frame_id}->base_link failed '
+                f'({type(e).__name__}): {e}')
             return None
-        q = self._current_odom.pose.pose.orientation
-        return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                           1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        p, q = t.transform.translation, t.transform.rotation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y),
+                         1 - 2 * (q.y * q.y + q.z * q.z))
+        return (p.x, p.y, yaw)
 
     @staticmethod
     def _yaw_error(target: float, current: float) -> float:
@@ -293,32 +327,44 @@ class LimbicRowFollow(Node):
         """
         Phase 0: rotate in place to face goal_pose before enabling Neo.
 
+        Uses TF (map->base_link, or whatever goal_pose.header.frame_id is)
+        for both the initial bearing calculation and the live yaw read
+        during the spin — NOT raw /odometry/global, which is in odom frame.
+        goal_pose is in map frame; mixing the two silently corrupts the
+        bearing by the static map->odom offset, which is exactly what
+        caused the robot to spin the wrong way despite already being
+        correctly aligned with the row.
+
         Safe to drive /cmd_vel directly here — Neo/visual servo has not
         been enabled yet, so nothing else is publishing on this topic for
         this goal. Returns True once aligned within tolerance. On
-        cancel/timeout/no-odom it calls the appropriate terminal
-        goal_handle method itself (mirroring the Phase 1/2 pattern) and
-        returns False — callers should just `return result` in that case.
+        cancel/timeout/no-TF it calls the appropriate terminal goal_handle
+        method itself (mirroring the Phase 1/2 pattern) and returns False
+        — callers should just `return result` in that case.
         """
         tol = math.radians(
             self.get_parameter("row_entry_align_tolerance_deg").value)
         timeout_s = self.get_parameter("row_entry_align_timeout_s").value
         ang_speed = self.get_parameter("row_entry_align_angular_speed").value
+        goal_frame = goal_pose.header.frame_id or 'map'
 
-        # Wait briefly for odom if the action started before any arrived.
+        # Wait briefly for TF if the action started before it was available.
         wait_start = self.get_clock().now()
         wait_timeout = Duration(seconds=5.0)
-        while self._current_odom is None and rclpy.ok():
+        start_pose = self._pose_in_frame(goal_frame)
+        while start_pose is None and rclpy.ok():
             if self.get_clock().now() - wait_start > wait_timeout:
                 self.get_logger().error(
-                    "limbic_row_follow: no odom before align phase — aborting")
+                    "limbic_row_follow: no TF (%s->base_link) before align "
+                    "phase — aborting" % goal_frame)
                 goal_handle.abort()
                 return False
             time.sleep(0.05)
+            start_pose = self._pose_in_frame(goal_frame)
 
-        cur = self._current_odom.pose.pose.position
-        dx = goal_pose.pose.position.x - cur.x
-        dy = goal_pose.pose.position.y - cur.y
+        cur_x, cur_y, _cur_yaw = start_pose
+        dx = goal_pose.pose.position.x - cur_x
+        dy = goal_pose.pose.position.y - cur_y
         if math.hypot(dx, dy) < 1e-3:
             # Already essentially at the goal position — nothing meaningful
             # to align to (shouldn't normally happen for a row edge).
@@ -337,11 +383,12 @@ class LimbicRowFollow(Node):
                 goal_handle.canceled()
                 return False
 
-            yaw = self._current_yaw()
-            if yaw is None:
+            pose = self._pose_in_frame(goal_frame)
+            if pose is None:
                 self._publish_zero_twist()
                 goal_handle.abort()
                 return False
+            _px, _py, yaw = pose
 
             err = self._yaw_error(target_yaw, yaw)
             if abs(err) <= tol:
