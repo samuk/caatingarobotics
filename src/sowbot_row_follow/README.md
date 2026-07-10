@@ -207,7 +207,24 @@ When the raw anchor jumps by more than `tsm_swap_threshold_frac·W` in a single 
 
 At `linear_vel=0.15 m/s`, `tsm_swap_hold_s=9.0` ≈ 1.35 m of travel before switching.
 
-**When to use TSM:** sparse germination, end-of-bed conditions, noisy backgrounds. More robust than `scanwin` at the cost of slightly higher per-frame CPU (line-scan is an O(W) loop). The multi-row path (`tsm_n_rows=2`) is the recommended field configuration.
+**Deviations from the published paper**
+
+`triangle_scan.py`'s Anchor-Scan/Line-Scan geometry follows de Silva *et al.* (2024) directly. Everything below it is engineering layered on top, active by default in the shipped config (`config/crop_row_params.yaml`, not `triangle_scan.py`'s own dataclass defaults, which just mirror the paper's stated parameters for reference):
+
+| Aspect | Paper | This deployment (shipped config) | Why |
+|---|---|---|---|
+| Input mask | Clean segmentation mask (assumed) | ExG + Otsu vegetation index, then morphological opening (`tsm_morph_kernel: 5`) | ExG+Otsu carries shadow/weed speckle the paper's mask doesn't; opening strips small fragments before column-summing |
+| Anchor selection | `argmax` — tallest column, unbiased | `spatial_prior` — sticky tracking, penalises distance from previous frame's anchor (`tsm_prior_lambda: 0.05`) | Stops the pick flipping between two near-equal peaks frame-to-frame when two rows are visible |
+| Line-scan angle | Unconstrained | Clamped to a ±30° cone around the apex (`tsm_max_angle_deg: 30.0`) | Stops a sparse/noisy frame fitting a diagonal; sized to leave margin around the 8° Phase-0 entry-alignment tolerance |
+| Anchor search band | Full frame width, by convention | Narrowed to 40–60% of width (`tsm_amin_frac`/`amax_frac: 0.4/0.6`) | Hard-restricts the scan to the expected central row rather than relying on anchor-selection bias alone |
+| Row count | Single central row | Single row (`tsm_n_rows: 1`) — multi-row banding exists in code but isn't the shipped config | See contradiction flagged in the parameter table above |
+| Line fit | Single free endpoint (line_scan) | Same (`tsm_fit_mode: "tsm"`) | A RANSAC-over-raw-pixels alternative exists in code but isn't enabled |
+| Temporal smoothing | Complementary filter (not reproduced — reference doc unavailable) | Independent EMA (`α=0.4`) + outlier gate (`jump_gate_frac=0.35`) + bounded hold (`max_hold=2`) | Same role, different design |
+| Row-loss handling | Not specified | Swap-hold: freezes last geometry for `tsm_swap_hold_s: 9.0`s once the anchor jumps more than `tsm_swap_threshold_frac: 0.30`×W, before accepting a new row | Bridges germination gaps without permanently locking out a genuine row switch |
+
+Also worth noting: the reference TSM implementation (rajithadesilva/TSM) is CC BY-NC-ND, so `triangle_scan.py` is a clean-room reimplementation from the paper's written description only — even the "paper-faithful" path (`tsm_fit_mode="tsm"`, `anchor_select="argmax"`) is faithful to the algorithm as described, not verified against the original authors' code.
+
+**When to use TSM:** sparse germination, end-of-bed conditions, noisy backgrounds. More robust than `scanwin` at the cost of slightly higher per-frame CPU (line-scan is an O(W) loop). The multi-row path (`tsm_n_rows=2`) is the recommended field configuration once the shipped-vs-recommended contradiction above is resolved.
 
 ### 3. Visual servoing controller
 
@@ -264,19 +281,21 @@ All parameters live in `config/crop_row_params.yaml`.
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `camera_height_m` | `1.2` | **Measure on your robot** |
-| `camera_tilt_deg` | `-80.0` | **Measure on your robot** |
+| `camera_height_m` | `1.055` | Derived from `ifarmate.urdf.xacro` cam_mount_z, not a placeholder — **re-measure if your camera mount differs from ifarmate** |
+| `camera_tilt_deg` | `-20.0` | Derived from `ifarmate.urdf.xacro` sensor pitch (0.35 rad). **The old `1.2` / `-80.0` values in this table were unconfirmed BonnBot placeholders that were never updated for Sowbot — per the config file's own comments they were very likely corrupting visual-servo steering while TSM detection itself still looked fine in `debug_image`. Do not reuse those old numbers.** |
 | `image_width` / `image_height` | `640` / `480` | Must match camera output |
 | `linear_vel` | `0.15` | m/s forward speed during visual servo |
 | `max_omega` | `0.4` | Hard angular velocity cap (rad/s) |
 | `detector` | `scanwin` | `scanwin` or `tsm`; overridden by launch arg |
-| `tsm_n_rows` | `2` | Bands to scan simultaneously (1 = single-row + swap-hold) |
-| `tsm_anchor_select` | `leftmost_peak` | Anchor selection mode (see above) |
+| `tsm_n_rows` | `1` | Bands to scan simultaneously. **Shipped as 1 (single-row + swap-hold) even though this doc's "When to use TSM" note above calls `tsm_n_rows=2` the recommended field config — unresolved contradiction, not yet reconciled one way or the other** |
+| `tsm_anchor_select` | `spatial_prior` | Sticky tracking, penalises distance from previous anchor (`tsm_prior_lambda: 0.05`) — not `leftmost_peak` |
 | `tsm_swap_hold_s` | `9.0` | Seconds to hold before accepting a row switch |
-| `tsm_swap_threshold_frac` | `0.15` | Anchor shift fraction that triggers hold |
+| `tsm_swap_threshold_frac` | `0.30` | Anchor shift fraction that triggers hold |
 | `tsm_filter_alpha` | `0.4` | EMA blend weight (lower = smoother) |
 | `tsm_filter_max_hold` | `2` | Max consecutive misses before heartbeat dies |
-| `tsm_max_angle_deg` | `0.0` | Near-vertical cone clamp; `0.0` = disabled |
+| `tsm_max_angle_deg` | `30.0` | Near-vertical cone clamp. Sized against `row_entry_align_tolerance_deg: 8.0` in the Phase-0 alignment params below — don't tighten one without checking the other |
+
+Values above are `config/crop_row_params.yaml` as shipped (the file `crop_row_nav.launch.py` actually loads) — not `crop_row_node.py`'s `declare_parameter()` fallbacks, which differ on several of these and only apply if the yaml key is absent.
 
 ### limbic_row_follow_node
 
