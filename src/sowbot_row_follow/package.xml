@@ -26,6 +26,13 @@
 
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <!-- topological_navigation_msgs is imported by row_discovery_node.py inside a
+       try/except (see its header comment); it degrades gracefully to
+       file-only writes if the package isn't present, so it's listed here as
+       an exec_depend rather than a hard <depend>. -->
+  <exec_depend>topological_navigation_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
