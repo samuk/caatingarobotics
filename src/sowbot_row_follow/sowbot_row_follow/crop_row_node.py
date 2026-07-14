@@ -372,6 +372,15 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_b_frac", 0.0)
         self.declare_parameter("tsm_c_frac", 1.0)
         self.declare_parameter("tsm_anchor_min_sum", 1.0)
+        # Min pixel-sum the WINNING line_scan/ransac candidate must clear to
+        # be trusted (see triangle_scan.TSMParams.line_min_sum). Without
+        # this, end-of-row (top strip still clears anchor_min_sum, bottom
+        # has no row left) produced a zero-support "valid" line pinned to
+        # the edge of the search range, which never flips the
+        # /aoc/heartbeat/neo_vision heartbeat false — so row_discovery_node
+        # never saw row_lost_confirm_s elapse and never called
+        # _drop_row_end_node() to hand over.
+        self.declare_parameter("tsm_line_min_sum", 1.0)
         self.declare_parameter("tsm_morph_kernel", 5)
         self.declare_parameter("tsm_anchor_select", "spatial_prior")
         self.declare_parameter("tsm_peak_rel_thresh", 0.6)
@@ -427,6 +436,7 @@ class CropRowNode(Node):
                 b_frac=p("tsm_b_frac").value,
                 c_frac=p("tsm_c_frac").value,
                 anchor_min_sum=p("tsm_anchor_min_sum").value,
+                line_min_sum=p("tsm_line_min_sum").value,
                 morph_kernel=p("tsm_morph_kernel").value,
                 anchor_select=str(p("tsm_anchor_select").value),
                 peak_rel_thresh=p("tsm_peak_rel_thresh").value,
