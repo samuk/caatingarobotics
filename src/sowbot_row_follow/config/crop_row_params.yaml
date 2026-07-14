@@ -94,10 +94,13 @@ crop_row_node:
     tsm_filter_enable: true
     tsm_filter_alpha: 0.4
     tsm_filter_jump_gate_frac: 0.35
-    # CHANGED 2 -> 1. Fewer frames of free "hold" once the raw detector
-    # actually starts reporting invalid. Small effect on its own (~1 frame
-    # of latency) — anchor_min_sum is doing the real work.
-    tsm_filter_max_hold: 1
+    # REVERTED 1 -> 2. Was tightened alongside tsm_max_strip_shifts as a
+    # second belt-and-braces cut against the "never drops" bug. With that
+    # bug now fixed properly (tsm_line_min_sum) there's no need to also
+    # shave the filter's hold grace — do it here and it just adds
+    # sensitivity to normal single-frame dropouts (motion blur, a stone,
+    # a shadow) that aren't real row-ends.
+    tsm_filter_max_hold: 2
 
     tsm_anchor_select: "spatial_prior"
     tsm_peak_rel_thresh: 0.6
@@ -121,15 +124,23 @@ crop_row_node:
     tsm_ransac_min_inliers: 30
     tsm_ransac_max_points: 2000
 
-    # NOW WIRED (crop_row_node.py declares tsm_max_strip_shifts and threads
-    # it into TSMParams(...)). When the top anchor strip goes empty,
-    # anchor_scan shifts the search strip down by h and retries, up to this
-    # many times — on a 480px image with tsm_s=0.32 that's searching nearly
-    # the full frame height (down to right in front of the robot) before it
-    # will call the row lost. 0 makes anchor_scan fail as soon as the top
-    # (far-field) strip is empty, which is exactly where a real end-of-row
-    # gap first appears.
-    tsm_max_strip_shifts: 0
+    # REVERTED 0 -> 2. At 0, anchor_scan only ever checks the top strip
+    # (rows [0, 0.32*H) — far field, near the horizon at this pitch) and
+    # never shifts down, so it never looks at the near field/directly in
+    # front of the robot. Result: an obvious row right under the camera
+    # gets reported invalid because anchor_scan structurally never scans
+    # that part of the frame. That's a search-range bug, not a
+    # loss-detection feature.
+    #
+    # Row-end loss detection is already handled correctly elsewhere:
+    # tsm_line_min_sum (above) stops line_scan from returning a
+    # zero-support phantom "valid" line, and row_discovery_node's
+    # row_lost_confirm_s (1.5s) debounces that invalid signal before
+    # calling it a real row-end. Restricting the spatial search area was
+    # redundant on top of that and is what broke near-field detection.
+    # Leave at 2 (searches down to ~96% of frame height) and let
+    # line_min_sum + row_lost_confirm_s do the loss-detection job.
+    tsm_max_strip_shifts: 2
 
     tsm_swap_hold_s: 9.0             # unchanged — only affects row-SWITCH
     tsm_swap_threshold_frac: 0.30    # debounce, not loss detection; raw
