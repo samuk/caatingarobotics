@@ -699,11 +699,21 @@ class CropRowNode(Node):
                     avg_row = (avg_bx, avg_m, avg_b)
             else:
                 # Single-row path with swap-hold debounce.
-                tsm_raw = detect_central_row(
+                tsm_detected = detect_central_row(
                     mask, self.tsm_params,
                     prev_anchor=self.tsm_filters[0].prev_anchor,
                 )
-                tsm_raw, held, swap_remaining_s = self._tsm_apply_swap_hold(tsm_raw)
+                # Calibration aid for tsm_line_min_sum — read the real
+                # pixel-sums off the console (no need for the debug image)
+                # to pick a threshold that clears real rows but rejects
+                # genuine row-ends. Remove once tsm_line_min_sum is settled.
+                self.get_logger().info(
+                    "TSM line_sum=%.1f (threshold=%.1f) valid=%s"
+                    % (tsm_detected.line_sum, self.tsm_params.line_min_sum,
+                       tsm_detected.valid),
+                    throttle_duration_sec=1.0)
+                tsm_raw, held, swap_remaining_s = self._tsm_apply_swap_hold(
+                    tsm_detected)
                 tsm = self.tsm_filters[0].update(tsm_raw, self.img_w, self.img_h)
                 detected_rows = (
                     [(tsm.bottom_x, tsm.slope, tsm.intercept)] if tsm.valid else []
