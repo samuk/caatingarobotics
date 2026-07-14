@@ -74,6 +74,22 @@ crop_row_node:
     # lower if it starts dropping lock on real rows mid-run.
     tsm_anchor_min_sum: 36.0
 
+    # tsm_line_min_sum was declared in code (crop_row_node.py) but never set
+    # here, so it was silently defaulting to 1.0 — line_scan sums mask
+    # values one-per-row along a near-full-height diagonal (up to 480
+    # samples on this image), so a threshold of 1.0 is cleared by a single
+    # stray noise pixel and never actually rejects anything. This is why
+    # the debug line was locking to the bottom-left corner of the search
+    # cone at every real row-end: line_scan's "winner" defaults to the
+    # leftmost candidate when every real candidate scores ~0, and nothing
+    # was there to catch that and report invalid instead.
+    # Starting value: ~17% of the 480-row line length (matching the ~23%
+    # coverage logic used for tsm_anchor_min_sum above). Raise further if
+    # the line still locks to the corner at row-end; lower if it starts
+    # dropping lock on real thin/young rows mid-run — tune while watching
+    # /caatinga_vision/row_nav/debug_image, same as anchor_min_sum.
+    tsm_line_min_sum: 80.0
+
     tsm_morph_kernel: 5
 
     tsm_single_row_offset_px: 0
@@ -110,14 +126,12 @@ crop_row_node:
     tsm_ransac_min_inliers: 30
     tsm_ransac_max_points: 2000
 
-    # NOT YET WIRED — requires a 3-line code patch to crop_row_node.py
-    # before this has any effect (see chat). Hardcoded today at 2 via
-    # TSMParams.max_strip_shifts default. This is the OTHER big lever:
-    # when the top anchor strip goes empty, anchor_scan currently shifts
-    # the search strip down by h and retries, up to 2 times — on a 480px
-    # image with tsm_s=0.32 that's searching nearly the full frame height
-    # (down to right in front of the robot) before it will call the row
-    # lost. Setting this to 0 makes anchor_scan fail as soon as the top
+    # NOW WIRED (crop_row_node.py declares tsm_max_strip_shifts and threads
+    # it into TSMParams(...)). When the top anchor strip goes empty,
+    # anchor_scan shifts the search strip down by h and retries, up to this
+    # many times — on a 480px image with tsm_s=0.32 that's searching nearly
+    # the full frame height (down to right in front of the robot) before it
+    # will call the row lost. 0 makes anchor_scan fail as soon as the top
     # (far-field) strip is empty, which is exactly where a real end-of-row
     # gap first appears.
     tsm_max_strip_shifts: 0
