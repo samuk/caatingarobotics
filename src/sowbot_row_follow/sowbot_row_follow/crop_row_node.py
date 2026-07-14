@@ -474,6 +474,7 @@ class CropRowNode(Node):
             self._swap_hold_s: float = float(p("tsm_swap_hold_s").value)
             self._swap_thresh_px: float = p("tsm_swap_threshold_frac").value * self.img_w
             self._held_anchor_x: Optional[float] = None
+            self._held_anchor_y: Optional[float] = None
             self._held_bottom_x: Optional[float] = None
             self._swap_deadline: Optional[rclpy.time.Time] = None
 
@@ -534,9 +535,12 @@ class CropRowNode(Node):
         visible — TSMFilter's EMA would smear a 240px row-switch into ~80px
         increments that never cross the threshold.
 
-        Holds the last accepted row's anchor_x AND bottom_x together so that
-        _make_held_tsm reconstructs the correct frozen line geometry — not a
-        chimera of the old anchor and the new row's base point.
+        Holds the last accepted row's anchor_x, anchor_y AND bottom_x
+        together so that _make_held_tsm reconstructs the correct frozen line
+        geometry — not a chimera of the old anchor and the new row's base
+        point, and not a line falsely pinned to row 0 (anchor_scan can
+        legitimately accept an anchor from a shifted strip, i.e. anchor_y
+        > 0 — see triangle_scan.anchor_scan).
 
         Returns (tsm_to_use, held, swap_remaining_s).
         """
@@ -544,11 +548,13 @@ class CropRowNode(Node):
             return tsm, False, 0.0
 
         new_ax = float(tsm.anchor_xy[0])
+        new_ay = float(tsm.anchor_xy[1])
         new_bx = float(tsm.bottom_x)
 
         # First valid detection — lock on unconditionally.
         if self._held_anchor_x is None:
             self._held_anchor_x = new_ax
+            self._held_anchor_y = new_ay
             self._held_bottom_x = new_bx
             self._swap_deadline = None
             return tsm, False, 0.0
@@ -561,6 +567,7 @@ class CropRowNode(Node):
             # detections which have higher frame-to-frame jitter than
             # post-filter values) and reset any pending swap timer.
             self._held_anchor_x = 0.95 * self._held_anchor_x + 0.05 * new_ax
+            self._held_anchor_y = 0.95 * self._held_anchor_y + 0.05 * new_ay
             self._held_bottom_x = 0.95 * self._held_bottom_x + 0.05 * new_bx
             self._swap_deadline = None
             return tsm, False, 0.0
@@ -583,6 +590,7 @@ class CropRowNode(Node):
         self.get_logger().info(
             "TSM row-swap hold expired: accepting new row at anchor_x=%.0f" % new_ax)
         self._held_anchor_x = new_ax
+        self._held_anchor_y = new_ay
         self._held_bottom_x = new_bx
         self._swap_deadline = None
         return tsm, False, 0.0
@@ -591,18 +599,24 @@ class CropRowNode(Node):
         """Reconstruct a TSMResult from the held anchor + bottom endpoint pair.
 
         Both points belong to the same (last accepted) row, so slope and
-        intercept correctly describe that row's frozen geometry.
+        intercept correctly describe that row's frozen geometry — using the
+        held anchor's REAL row (self._held_anchor_y), not row 0. Assuming
+        row 0 here silently mis-slopes the held/hold-timer line whenever the
+        frozen anchor came from a shifted strip (anchor_y > 0), which is
+        exactly the case end-of-row handling is meant to cover.
         """
         from sowbot_row_follow.triangle_scan import TSMResult
         ax = self._held_anchor_x
+        ay = self._held_anchor_y if self._held_anchor_y is not None else 0.0
         px = self._held_bottom_x
-        denom = float(self.img_h - 1) if self.img_h > 1 else 1.0
+        denom = float(self.img_h - 1 - ay) if (self.img_h - 1) > ay else 1.0
         m = (px - ax) / denom
+        b = ax - m * ay
         return TSMResult(
-            anchor_xy=(int(round(ax)), 0),
+            anchor_xy=(int(round(ax)), int(round(ay))),
             base_xy=(int(round(px)), self.img_h - 1),
             slope=m,
-            intercept=float(ax),
+            intercept=b,
             bottom_x=float(px),
             valid=True,
         )
@@ -610,6 +624,7 @@ class CropRowNode(Node):
     def _reset_swap_hold(self):
         """Clear all row-swap hold state (called on disable and re-enable)."""
         self._held_anchor_x = None
+        self._held_anchor_y = None
         self._held_bottom_x = None
         self._swap_deadline = None
 
