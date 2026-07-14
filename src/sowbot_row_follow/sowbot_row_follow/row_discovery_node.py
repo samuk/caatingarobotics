@@ -112,7 +112,7 @@ from enum import Enum, auto
 import rclpy
 import yaml
 from geometry_msgs.msg import Twist
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
@@ -204,6 +204,19 @@ class RowDiscoveryNode(Node):
             self.get_parameter('first_turn_direction').value.lower() != 'left')
 
         self._cbg = ReentrantCallbackGroup()
+        # _tick runs alone (never re-entrant): _call_enable() blocks
+        # synchronously inside _tick for up to enable_service_timeout_s,
+        # and with a Reentrant group + MultiThreadedExecutor the same
+        # still-true row-lost condition could otherwise trigger a second,
+        # concurrent _tick before the first one finishes transitioning
+        # self._state — causing duplicate node drops and, if enough
+        # concurrent invocations pile up inside the same blocking wait,
+        # a self-deadlock (no executor thread left free to deliver the
+        # service response the blocked threads are all waiting on).
+        # Service clients/subscriptions stay on the reentrant self._cbg so
+        # their response callbacks can still be delivered by another
+        # thread while a single in-flight _tick is blocked waiting on one.
+        self._timer_cbg = MutuallyExclusiveCallbackGroup()
 
         # ------------------------------------------------------------------
         # TF
@@ -265,7 +278,7 @@ class RowDiscoveryNode(Node):
                             callback_group=self._cbg)
 
         self._timer = self.create_timer(self._dt, self._tick,
-                                          callback_group=self._cbg)
+                                          callback_group=self._timer_cbg)
 
         self.get_logger().info('row_discovery_node ready (idle)')
 
@@ -694,9 +707,13 @@ class RowDiscoveryNode(Node):
             },
         }
 
-        self._append_and_write(node_dict, connect_to, name, edge_action)
+        wrote = self._append_and_write(node_dict, connect_to, name, edge_action)
         self._last_node_name = name
-        self._set_status(f'dropped {name}' + (f' <- {connect_to}' if connect_to else ''))
+        if wrote:
+            self._set_status(
+                f'dropped {name}' + (f' <- {connect_to}' if connect_to else ''))
+        else:
+            self._set_status(f'{name} already recorded — skipped duplicate drop')
 
     # ------------------------------------------------------------------
     # File I/O — same load/append/write/switch pattern as ui_node.py's
@@ -727,7 +744,7 @@ class RowDiscoveryNode(Node):
         }
 
     def _append_and_write(self, node_dict: dict, connect_to: str | None,
-                           name: str, edge_action: str) -> None:
+                           name: str, edge_action: str) -> bool:
         map_file = os.path.join(self._maps_dir, self._map_name)
         try:
             os.makedirs(self._maps_dir, exist_ok=True)
@@ -736,7 +753,7 @@ class RowDiscoveryNode(Node):
                         for e in doc.get('nodes', [])}
             if name in existing:
                 self.get_logger().warn(f'{name} already in map — skipping')
-                return
+                return False
 
             doc.setdefault('meta', {})['last_updated'] = (
                 datetime.now(timezone.utc).strftime('%d-%m-%Y_%H-%M-%S'))
@@ -756,8 +773,10 @@ class RowDiscoveryNode(Node):
                           allow_unicode=True, sort_keys=False)
             self._topo_doc = doc
             self._reload_live_map(map_file)
+            return True
         except OSError as e:
             self.get_logger().error(f'row_discovery: failed writing map: {e}')
+            return False
 
     def _reload_live_map(self, map_file: str) -> None:
         if not _TOPO_SRV_OK or self._switch_map_cli is None:
