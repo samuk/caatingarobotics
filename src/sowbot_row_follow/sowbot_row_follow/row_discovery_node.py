@@ -94,6 +94,17 @@
 # (not just a bad frame or a misaligned turn), and discovery stops cleanly
 # with the map so far intact.
 #
+# IMPORTANT — headland_clearance_m + max_search_distance_m is the worst-
+# case straight-line distance this node will drive PAST a row-end before
+# giving up on the straight seek and falling back to WIGGLE_SEEK. This
+# node has no idea how large the actual headland space is (no world/map
+# boundary awareness at all) — that number must stay comfortably under
+# whatever headland margin the field/world actually has, or a slightly
+# misaligned TURN_2 will drive the robot off the edge of a real field's
+# headland or, in sim, off the edge of the generated ground plane. In this
+# repo that's topo_to_forest3d.py's --headland (see manage.py's world_gen
+# invocation) — keep the two in sync if either changes.
+#
 # Row-end detection during FOLLOW_ROW is the mirror image: a heartbeat that
 # goes (and stays) false for `row_lost_confirm_s` is treated as reaching
 # the end of the row, not a transient occlusion — same debounce reasoning
@@ -163,7 +174,7 @@ class RowDiscoveryNode(Node):
         self.declare_parameter('creep_linear_vel', 0.12)
         self.declare_parameter('row_lost_confirm_s', 1.5)
         self.declare_parameter('row_reacquire_confirm_s', 0.75)
-        self.declare_parameter('max_search_distance_m', 4.0)
+        self.declare_parameter('max_search_distance_m', 1.5)
         self.declare_parameter('wiggle_step_m', 0.10)
         self.declare_parameter('wiggle_speed_mps', 0.15)
         self.declare_parameter('wiggle_max_sweep_deg', 90.0)
