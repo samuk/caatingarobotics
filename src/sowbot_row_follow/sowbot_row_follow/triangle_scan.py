@@ -125,6 +125,11 @@ class TSMResult:
     intercept: float        # b in x = m*y + b
     bottom_x: float         # x where row meets bottom edge (== P_r.x)
     valid: bool
+    # Raw line_scan pixel-sum for the winning candidate (0.0 where not
+    # computed, e.g. no-anchor / ransac / filtered-estimate results).
+    # Surfaced so tsm_line_min_sum can be calibrated against real numbers
+    # instead of guessed — see crop_row_node.py's throttled log of this.
+    line_sum: float = 0.0
 
 
 @dataclass
@@ -513,7 +518,8 @@ def _detect_from_mask01(mask01: np.ndarray,
         # itself has run out. Report invalid instead of returning the
         # degenerate zero-support "winner" (which was previously always the
         # leftmost/edge candidate, i.e. a line pinned to the frame corner).
-        return TSMResult((0, 0), (0, 0), 0.0, 0.0, 0.0, False)
+        return TSMResult((0, 0), (0, 0), 0.0, 0.0, 0.0, False,
+                          line_sum=best_sum)
 
     denom = float(h_img - 1) if h_img > 1 else 1.0
     m = (px - ax) / denom
@@ -525,6 +531,7 @@ def _detect_from_mask01(mask01: np.ndarray,
         intercept=b,
         bottom_x=float(px),
         valid=True,
+        line_sum=best_sum,
     )
 
 
