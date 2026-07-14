@@ -74,21 +74,16 @@ crop_row_node:
     # lower if it starts dropping lock on real rows mid-run.
     tsm_anchor_min_sum: 36.0
 
-    # tsm_line_min_sum was declared in code (crop_row_node.py) but never set
-    # here, so it was silently defaulting to 1.0 — line_scan sums mask
-    # values one-per-row along a near-full-height diagonal (up to 480
-    # samples on this image), so a threshold of 1.0 is cleared by a single
-    # stray noise pixel and never actually rejects anything. This is why
-    # the debug line was locking to the bottom-left corner of the search
-    # cone at every real row-end: line_scan's "winner" defaults to the
-    # leftmost candidate when every real candidate scores ~0, and nothing
-    # was there to catch that and report invalid instead.
-    # Starting value: ~17% of the 480-row line length (matching the ~23%
-    # coverage logic used for tsm_anchor_min_sum above). Raise further if
-    # the line still locks to the corner at row-end; lower if it starts
-    # dropping lock on real thin/young rows mid-run — tune while watching
-    # /caatinga_vision/row_nav/debug_image, same as anchor_min_sum.
-    tsm_line_min_sum: 80.0
+    # Was 80.0 — too high: line_scan sums one pixel per row along the full
+    # line, but real per-plant rows have gaps of bare soil between plants,
+    # so even an obvious row can legitimately score well under that. 80.0
+    # was rejecting real detections, not just row-ends.
+    # crop_row_node.py now logs the actual line_sum (throttled, INFO level)
+    # so you can read real numbers off the console while driving a known
+    # row vs. a known row-end, and set this from that instead of a guess.
+    # 10.0 here is a conservative floor — only meant to unblock following
+    # while you gather those numbers, not a calibrated value.
+    tsm_line_min_sum: 10.0
 
     tsm_morph_kernel: 5
 
