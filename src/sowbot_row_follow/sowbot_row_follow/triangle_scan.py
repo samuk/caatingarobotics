@@ -243,14 +243,23 @@ def _select_anchor_col(col_sums: np.ndarray, p: TSMParams,
 
 
 def anchor_scan(mask01: np.ndarray, p: TSMParams,
-                prev_anchor: Optional[int] = None) -> Optional[int]:
-    """Return anchor column x (apex A) on the top edge, or None.
+                prev_anchor: Optional[int] = None) -> Optional[tuple]:
+    """Return (ax, ay): apex A's column and its real strip row, or None.
 
     Sums each column over a top ROI strip of height h = s*H, restricted to
     columns [Amin, Amax]. The winning column is chosen per p.anchor_select
     (see TSMParams). If the best column-sum is below anchor_min_sum, shift the
     strip down by h and retry (up to max_strip_shifts times) for end-of-row.
     prev_anchor (image coords) is only used by the "spatial_prior" mode.
+
+    ay is the top row of whichever shifted strip actually produced the
+    accepted anchor (0 on the first, unshifted strip; shift*h on later ones).
+    Callers MUST use this real ay — e.g. as the origin for line_scan's
+    A->P sweep — rather than assuming the anchor always sits on row 0. An
+    anchor accepted from a shifted strip legitimately lives partway down the
+    frame; treating it as row 0 fabricates a full-height line through empty
+    space above the strip and widens line_scan's search cone (proportional
+    to the A->P vertical span) well beyond what the real detection supports.
     """
     h_img, w_img = mask01.shape
     h = max(1, int(round(p.s * h_img)))
@@ -277,7 +286,7 @@ def anchor_scan(mask01: np.ndarray, p: TSMParams,
         # the chosen column, not the global max, so a biased pick that lands on
         # a too-weak column correctly triggers the strip shift / end-of-row).
         if col_sums[best_local] >= p.anchor_min_sum:
-            return amin + best_local
+            return amin + best_local, top
     return None
 
 
@@ -300,12 +309,20 @@ def _line_pixel_sum(mask01: np.ndarray, ax: int, ay: int,
     return float(mask01[yi, xi].sum())
 
 
-def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> tuple:
+def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams,
+             anchor_y: int = 0) -> tuple:
     """Return (P_r.x, best_sum): bottom-edge column maximising pixel-sum
     along A->P, and the pixel-sum that column achieved.
 
+    anchor_y is A's REAL row (from anchor_scan's returned ay), not always 0.
+    An anchor accepted from a shifted strip (end-of-row handling) sits
+    partway down the frame; sweeping from row 0 in that case would sum mask
+    values over empty space above the strip and inflate the angle cone
+    (proportional to (H-1) instead of the true (H-1-anchor_y) span), letting
+    noise far from the real detection outvote the true row.
+
     The candidate range is the configured B-C span intersected with a
-    near-vertical cone around the apex: |P.x - anchor_x| <= (H-1)*tan(angle),
+    near-vertical cone around the apex: |P.x - anchor_x| <= (py-ay)*tan(angle),
     so the chosen line cannot exceed p.max_angle_deg off image-vertical.
 
     best_sum is returned (rather than swallowed) so callers can tell a real
@@ -315,7 +332,7 @@ def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> tuple:
     """
     import math
     h_img, w_img = mask01.shape
-    ay = 0                       # A lies on the top edge
+    ay = anchor_y                # A lies on its real strip row
     py = h_img - 1               # B, C, P_r lie on the bottom edge
     b_x = int(round(p.b_frac * w_img))
     c_x = int(round(p.c_frac * w_img))
@@ -324,8 +341,11 @@ def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> tuple:
     lo, hi = min(b_x, c_x), max(b_x, c_x)
 
     # Near-vertical prior: clamp the bottom-point range to the angle cone.
+    # Proportional to the REAL vertical span (py-ay), not the full frame
+    # height, so an anchor found deep in the frame gets a proportionally
+    # tighter search cone instead of a full-height one.
     if p.max_angle_deg and 0 < p.max_angle_deg < 90:
-        dx = (h_img - 1) * math.tan(math.radians(p.max_angle_deg))
+        dx = max(0, py - ay) * math.tan(math.radians(p.max_angle_deg))
         lo = max(lo, int(math.floor(anchor_x - dx)))
         hi = min(hi, int(math.ceil(anchor_x + dx)))
         if lo > hi:               # cone falls entirely outside B-C: best effort
@@ -485,9 +505,10 @@ def _detect_from_mask01(mask01: np.ndarray,
                           too thin (sparse mask, end-of-row, etc.).
     """
     h_img, w_img = mask01.shape
-    ax = anchor_scan(mask01, p, prev_anchor)
-    if ax is None:
+    anchor = anchor_scan(mask01, p, prev_anchor)
+    if anchor is None:
         return TSMResult((0, 0), (0, 0), 0.0, 0.0, 0.0, False)
+    ax, ay = anchor
 
     if p.fit_mode == "ransac":
         amin = int(round(p.amin_frac * w_img))
@@ -510,7 +531,7 @@ def _detect_from_mask01(mask01: np.ndarray,
         # (see line_min_sum below), so this no longer silently produces a
         # phantom "valid" detection either.
 
-    px, best_sum = line_scan(mask01, ax, p)
+    px, best_sum = line_scan(mask01, ax, p, anchor_y=ay)
     if best_sum < p.line_min_sum:
         # anchor_scan found something in the top strip, but no candidate
         # bottom-edge line has real pixel support — e.g. end-of-row, where
@@ -521,11 +542,14 @@ def _detect_from_mask01(mask01: np.ndarray,
         return TSMResult((0, 0), (0, 0), 0.0, 0.0, 0.0, False,
                           line_sum=best_sum)
 
-    denom = float(h_img - 1) if h_img > 1 else 1.0
+    denom = float(h_img - 1 - ay) if h_img - 1 > ay else 1.0
     m = (px - ax) / denom
-    b = float(ax)
+    # Node convention keeps b as the intercept at y=0 (x = m*y + b) for
+    # downstream compatibility, extrapolated from the real anchor row rather
+    # than assumed to sit there — see anchor_scan's docstring.
+    b = float(ax) - m * ay
     return TSMResult(
-        anchor_xy=(ax, 0),
+        anchor_xy=(ax, ay),
         base_xy=(px, h_img - 1),
         slope=m,
         intercept=b,
@@ -543,10 +567,12 @@ def detect_central_row(mask: np.ndarray,
 
     Node convention: x = m*y + b  (x as a function of y), matching the existing
     crop_row_node fit_line / detect_crop_rows output so downstream visual
-    servoing is unchanged. Here A=(ax, 0) and P_r=(px, H-1):
-        m = (px - ax) / (H - 1)
-        b = ax                       (since x at y=0 is ax)
-    bottom_x = px.
+    servoing is unchanged. A=(ax, ay) and P_r=(px, H-1), where ay is the
+    anchor's REAL strip row (0 on an unshifted strip, but > 0 when
+    anchor_scan accepted a shifted strip during end-of-row handling):
+        m = (px - ax) / (H - 1 - ay)
+        b = ax - m*ay                (x extrapolated to y=0, node convention)
+    bottom_x = px. anchor_xy is (ax, ay) — do not assume ay == 0.
 
     prev_anchor (image coords, from the previous accepted frame) is consumed
     only by the "spatial_prior" anchor_select mode for sticky row tracking.
