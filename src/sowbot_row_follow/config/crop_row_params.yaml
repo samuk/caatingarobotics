@@ -27,83 +27,54 @@ crop_row_node:
     image_width: 640
     image_height: 480
 
-    # Derived from ifarmate.urdf.xacro (camera_joint + Gazebo <sensor> pose),
-    # not measured by hand — these are exact given the xacro's own values:
-    #   cam_mount_z = (cam_zone_bottom + cam_zone_top) / 2
-    #               = (0.86 + 1.25) / 2 = 1.055 m above ground
-    #   <pose>0 0 0 0 0.35 0</pose> -> pitch 0.35 rad = 20.0 deg downward
-    #     (xacro's own comment: "Pitched down 20°"; node convention is
-    #     downward = negative, per the docstring above)
-    # Replaces unconfirmed BonnBot placeholders (1.2 m, -80 deg) that were
-    # never updated for Sowbot/ifarmate — -80 deg is nearly straight down,
-    # wildly different from the camera's actual shallow 20 deg tilt, and
-    # was very likely corrupting the visual-servo steering output even
-    # while TSM detection itself looked reasonable in debug_image.
     camera_height_m: 1.055     # from ifarmate.urdf.xacro cam_mount_z
     camera_tilt_deg: -20.0     # from ifarmate.urdf.xacro sensor pitch (0.35 rad)
 
     # -------------------------------------------------------------------------
-    # NEW: Steering trim — compensates a CONSTANT lateral/yaw bias
+    # Steering trim — compensates a CONSTANT lateral/yaw bias
     # -------------------------------------------------------------------------
-    # Field/sim evidence (debug_image over multiple frames across a full run):
-    # the fitted row line sits a fixed offset to the left of image-centre in
-    # every frame, not just occasionally — same magnitude at the start of the
-    # run and 90s later. A bias that doesn't change with distance travelled
-    # or detection confidence is not a TSM tuning problem (anchor threshold,
-    # prior_lambda, angle clamp etc. only affect which/how a row is *found*).
-    # It means image-centre does not correspond to the robot's true forward
-    # heading — most likely a small camera yaw offset in the mount/xacro, or
-    # a sign/scale error in the Cherubini-Chaumette interaction matrix.
-    #
-    # steering_trim_deg is added to the computed heading error AFTER the TSM
-    # fit and BEFORE the interaction-matrix/omega calculation, so it corrects
-    # the symptom without touching row-detection logic. Root cause should
-    # still be checked separately (camera_joint yaw in ifarmate.urdf.xacro,
-    # driven dead-straight down a row with the robot's own steering disabled
-    # to see if debug_image still shows the same offset).
-    #
-    # Sign convention: positive trim steers the corrected heading to the
-    # RIGHT (compensates a left-veering bias). Start small (1-2 deg) and
-    # increase only if the robot still visibly favours the left row in
-    # debug_image once TSM detection itself is reporting a centred anchor.
-    # This must be wired into crop_row_node.py's heading-error computation
-    # (see comment there) — declaring it here alone does nothing.
     steering_trim_deg: 0.0
 
     # -------------------------------------------------------------------------
     # Detection tuning — adjust while watching debug_image_topic in Foxglove
     # -------------------------------------------------------------------------
-    n_scan_windows: 8          # Vertical scan columns. More = finer but slower.
-    window_width: 80           # Column width (px). Should span one full crop row.
-    min_contour_area: 40.0     # Min contour area (px²). Increase to filter soil noise.
+    n_scan_windows: 8
+    window_width: 80
+    min_contour_area: 40.0
     plant_close_kernel: 21
 
     plant_detect_neighborhood_px: 18
     plant_detect_min_dist_px: 6.0
 
     # -------------------------------------------------------------------------
-    # Velocity — start conservative, increase only once row-following is stable
+    # Velocity
     # -------------------------------------------------------------------------
-    linear_vel: 0.15           # Forward speed (m/s). BonnBot used 0.2.
-    omega_scaler: 0.1          # Scale on raw controller output. Upstream default.
-    max_omega: 0.4             # Hard angular velocity cap (rad/s).
+    linear_vel: 0.15
+    omega_scaler: 0.1
+    max_omega: 0.4
 
-    use_direct_cmd_vel: true   # value ignored; declare only
+    use_direct_cmd_vel: true
 
     heartbeat_timeout_s: 4.0
 
     detector: "scanwin"        # overridden by launch; do not rely on this value
-    tsm_s: 0.32                # anchor ROI height fraction (h = s*H)
+    tsm_s: 0.32                # anchor ROI height fraction (h = s*H) — unchanged
 
-    tsm_amin_frac: 0.4         # anchor column search start (fraction of width)
-    tsm_amax_frac: 0.6         # anchor column search end (fraction of width)
+    tsm_amin_frac: 0.4
+    tsm_amax_frac: 0.6
 
-    tsm_b_frac: 0.0            # line-scan Begin point x (fraction of width)
-    tsm_c_frac: 1.0            # line-scan Cease point x (fraction of width)
+    tsm_b_frac: 0.0
+    tsm_c_frac: 1.0
 
-    tsm_anchor_min_sum: 8.0
+    # CHANGED 8.0 -> 36.0. h = 0.32*480 = 154px, so old value accepted a
+    # column as "row" at <5% coverage — noise/shadow/single-weed level. 36
+    # is ~23% coverage: still tolerant of a thin/young row, but well above
+    # what end-of-row bare soil scores. This is the primary loss-sensitivity
+    # knob. Raise further if it's still holding past the visible row end;
+    # lower if it starts dropping lock on real rows mid-run.
+    tsm_anchor_min_sum: 36.0
 
-    tsm_morph_kernel: 5        # mask opening kernel px (denoise ExG); 0 = off
+    tsm_morph_kernel: 5
 
     tsm_single_row_offset_px: 0
 
@@ -112,25 +83,48 @@ crop_row_node:
     tsm_filter_enable: true
     tsm_filter_alpha: 0.4
     tsm_filter_jump_gate_frac: 0.35
-    tsm_filter_max_hold: 2
+    # CHANGED 2 -> 1. Fewer frames of free "hold" once the raw detector
+    # actually starts reporting invalid. Small effect on its own (~1 frame
+    # of latency) — anchor_min_sum is doing the real work.
+    tsm_filter_max_hold: 1
 
     tsm_anchor_select: "spatial_prior"
     tsm_peak_rel_thresh: 0.6
-    tsm_prior_lambda: 0.05
-    tsm_prior_init_frac: 0.5   # spatial_prior: first-frame seed — image centre
+    # CHANGED 0.05 -> 0.02. spatial_prior picks the column that maximises
+    # (col_sum - prior_lambda*|distance from previous anchor|). At 0.05 it
+    # will happily pick a weak column next to the old anchor over a
+    # stronger column elsewhere — i.e. it can keep "confirming" leftover
+    # noise near where it was already locked instead of admitting the row
+    # moved or ended. Lower value lets raw column strength dominate.
+    tsm_prior_lambda: 0.02
+    tsm_prior_init_frac: 0.5
     tsm_weight_k: 0.5
     tsm_weight_side: "left"
 
     tsm_max_angle_deg: 30.0
 
-    tsm_fit_mode: "tsm"
+    tsm_fit_mode: "tsm"        # do NOT switch to "ransac" for this problem —
+                                # see note below, it doesn't gate validity.
     tsm_ransac_iters: 60
     tsm_ransac_corridor_px: 6.0
     tsm_ransac_min_inliers: 30
     tsm_ransac_max_points: 2000
 
-    tsm_swap_hold_s: 9.0
-    tsm_swap_threshold_frac: 0.30
+    # NOT YET WIRED — requires a 3-line code patch to crop_row_node.py
+    # before this has any effect (see chat). Hardcoded today at 2 via
+    # TSMParams.max_strip_shifts default. This is the OTHER big lever:
+    # when the top anchor strip goes empty, anchor_scan currently shifts
+    # the search strip down by h and retries, up to 2 times — on a 480px
+    # image with tsm_s=0.32 that's searching nearly the full frame height
+    # (down to right in front of the robot) before it will call the row
+    # lost. Setting this to 0 makes anchor_scan fail as soon as the top
+    # (far-field) strip is empty, which is exactly where a real end-of-row
+    # gap first appears.
+    tsm_max_strip_shifts: 0
+
+    tsm_swap_hold_s: 9.0             # unchanged — only affects row-SWITCH
+    tsm_swap_threshold_frac: 0.30    # debounce, not loss detection; raw
+                                      # invalid bypasses this entirely.
 
 
 limbic_row_follow:
@@ -140,13 +134,6 @@ limbic_row_follow:
     enable_service_timeout_s: 4.0
     monitor_rate_hz: 10.0
 
-    # -------------------------------------------------------------------------
-    # Phase 0 (align) — see limbic_row_follow_node.py docstring
-    # -------------------------------------------------------------------------
-    # Headland nav_to_pose edges only guarantee loose xy/yaw tolerance at a
-    # row endpoint — fine for headland travel, not tight enough for TSM to
-    # find the row on its first frame (tsm_max_angle_deg above is 30, so
-    # 8 deg leaves comfortable margin without a slow in-place spin).
     row_entry_align_tolerance_deg: 8.0
     row_entry_align_timeout_s: 15.0
-    row_entry_align_angular_speed: 0.3   # rad/s, in-place rotation speed
+    row_entry_align_angular_speed: 0.3
