@@ -102,6 +102,18 @@ class TSMParams:
     ransac_corridor_px: float = 6.0   # inlier band half-width (px) around a candidate line
     ransac_min_inliers: int = 30      # min inlier pixel count to trust the RANSAC fit
     ransac_max_points: int = 2000     # subsample mask pixels above this count (speed)
+    # ── Line-scan minimum support ────────────────────────────────────────────
+    # anchor_scan only checks the TOP strip. At end-of-row the top strip can
+    # still clear anchor_min_sum (residual soil/horizon texture) while the
+    # BOTTOM of the mask has no row structure at all. Without this check
+    # line_scan/ransac_line_fit's "best" candidate degenerates to whichever
+    # column happens to be tried first (zero real pixel support) and
+    # _detect_from_mask01 would still report valid=True — a phantom row
+    # pinned to the edge of the search range. line_min_sum is the minimum
+    # pixel-sum (same units as anchor_min_sum) the WINNING line_scan
+    # candidate must clear to be trusted; below this, the frame is reported
+    # invalid instead of silently degrading.
+    line_min_sum: float = 1.0
 
 
 @dataclass
@@ -283,12 +295,18 @@ def _line_pixel_sum(mask01: np.ndarray, ax: int, ay: int,
     return float(mask01[yi, xi].sum())
 
 
-def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> int:
-    """Return P_r.x: bottom-edge column maximising pixel-sum along A->P.
+def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> tuple:
+    """Return (P_r.x, best_sum): bottom-edge column maximising pixel-sum
+    along A->P, and the pixel-sum that column achieved.
 
     The candidate range is the configured B-C span intersected with a
     near-vertical cone around the apex: |P.x - anchor_x| <= (H-1)*tan(angle),
     so the chosen line cannot exceed p.max_angle_deg off image-vertical.
+
+    best_sum is returned (rather than swallowed) so callers can tell a real
+    detection apart from a degenerate "winner" chosen among all-zero
+    candidates (e.g. end-of-row, where the top strip still has enough mass
+    to pass anchor_scan but nothing exists along any bottom-edge candidate).
     """
     import math
     h_img, w_img = mask01.shape
@@ -320,7 +338,7 @@ def line_scan(mask01: np.ndarray, anchor_x: int, p: TSMParams) -> int:
         if s > best_sum:
             best_sum = s
             best_x = int(px)
-    return best_x
+    return best_x, max(best_sum, 0.0)
 
 
 def ransac_line_fit(mask01: np.ndarray, p: TSMParams,
@@ -483,9 +501,20 @@ def _detect_from_mask01(mask01: np.ndarray,
                 valid=True,
             )
         # Too few inliers (sparse mask, end-of-row, etc.) — fall through to
-        # the tsm line_scan below rather than returning invalid.
+        # the tsm line_scan below. That fallback is now also support-gated
+        # (see line_min_sum below), so this no longer silently produces a
+        # phantom "valid" detection either.
 
-    px = line_scan(mask01, ax, p)
+    px, best_sum = line_scan(mask01, ax, p)
+    if best_sum < p.line_min_sum:
+        # anchor_scan found something in the top strip, but no candidate
+        # bottom-edge line has real pixel support — e.g. end-of-row, where
+        # residual top-strip texture clears anchor_min_sum but the row
+        # itself has run out. Report invalid instead of returning the
+        # degenerate zero-support "winner" (which was previously always the
+        # leftmost/edge candidate, i.e. a line pinned to the frame corner).
+        return TSMResult((0, 0), (0, 0), 0.0, 0.0, 0.0, False)
+
     denom = float(h_img - 1) if h_img > 1 else 1.0
     m = (px - ax) / denom
     b = float(ax)
