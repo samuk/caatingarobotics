@@ -659,11 +659,14 @@ class TSMFilter:
     def __init__(self, fp: Optional["TSMFilterParams"] = None):
         self.fp = fp or TSMFilterParams()
         self._ax: Optional[float] = None    # filtered anchor x
+        self._ay: Optional[float] = None    # filtered anchor row (real row,
+                                             # NOT always 0 — see anchor_scan)
         self._px: Optional[float] = None    # filtered base x
         self._misses = 0
 
     def reset(self):
         self._ax = None
+        self._ay = None
         self._px = None
         self._misses = 0
 
@@ -678,13 +681,17 @@ class TSMFilter:
         return None if self._ax is None else int(round(self._ax))
 
     def _emit(self, h_img: int) -> TSMResult:
-        denom = float(h_img - 1) if h_img > 1 else 1.0
+        ay = self._ay if self._ay is not None else 0.0
+        denom = float(h_img - 1 - ay) if (h_img - 1) > ay else 1.0
         m = (self._px - self._ax) / denom
+        # Node convention: b is the intercept at y=0, extrapolated from the
+        # real (filtered) anchor row — see anchor_scan/_detect_from_mask01.
+        b = self._ax - m * ay
         return TSMResult(
-            anchor_xy=(int(round(self._ax)), 0),
+            anchor_xy=(int(round(self._ax)), int(round(ay))),
             base_xy=(int(round(self._px)), h_img - 1),
             slope=m,
-            intercept=float(self._ax),
+            intercept=b,
             bottom_x=float(self._px),
             valid=True,
         )
@@ -697,6 +704,7 @@ class TSMFilter:
         if self._ax is None or self._px is None:
             if result.valid:
                 self._ax = float(result.anchor_xy[0])
+                self._ay = float(result.anchor_xy[1])
                 self._px = result.bottom_x
                 self._misses = 0
                 return self._emit(img_h)
@@ -720,6 +728,7 @@ class TSMFilter:
         # Accepted frame: EMA blend.
         a = self.fp.alpha
         self._ax = a * float(result.anchor_xy[0]) + (1.0 - a) * self._ax
+        self._ay = a * float(result.anchor_xy[1]) + (1.0 - a) * self._ay
         self._px = a * result.bottom_x + (1.0 - a) * self._px
         self._misses = 0
         return self._emit(img_h)
