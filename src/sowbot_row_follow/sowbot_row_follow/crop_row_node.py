@@ -372,6 +372,13 @@ class CropRowNode(Node):
         self.declare_parameter("tsm_b_frac", 0.0)
         self.declare_parameter("tsm_c_frac", 1.0)
         self.declare_parameter("tsm_anchor_min_sum", 1.0)
+        # Extra downward ROI shifts anchor_scan is allowed when the top strip
+        # is empty (see triangle_scan.TSMParams.max_strip_shifts). Previously
+        # declared in crop_row_params.yaml but never read here, so it always
+        # fell back to the TSMParams dataclass default of 2 — anchor_scan
+        # would keep retrying lower (closer to the robot) at real end-of-row
+        # instead of reporting the loss from the top (far-field) strip.
+        self.declare_parameter("tsm_max_strip_shifts", 2)
         # Min pixel-sum the WINNING line_scan/ransac candidate must clear to
         # be trusted (see triangle_scan.TSMParams.line_min_sum). Without
         # this, end-of-row (top strip still clears anchor_min_sum, bottom
@@ -436,6 +443,7 @@ class CropRowNode(Node):
                 b_frac=p("tsm_b_frac").value,
                 c_frac=p("tsm_c_frac").value,
                 anchor_min_sum=p("tsm_anchor_min_sum").value,
+                max_strip_shifts=int(p("tsm_max_strip_shifts").value),
                 line_min_sum=p("tsm_line_min_sum").value,
                 morph_kernel=p("tsm_morph_kernel").value,
                 anchor_select=str(p("tsm_anchor_select").value),
