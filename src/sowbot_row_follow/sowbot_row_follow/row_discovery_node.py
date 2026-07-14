@@ -17,6 +17,22 @@
 # navigation stack for subsequent (non-discovery) runs — row edges use the
 # 'limbic_row_follow' action exactly like a pre-planned F2C map would.
 #
+# `map_name` defaults to 'maize_map' — the SAME file topological_map_
+# manager2 is already serving live (see TMAP2_FILE) — so discovered nodes
+# land directly in the map the rest of the stack is using, not a separate
+# file. They coexist with whatever F2C-authored nodes are already in that
+# file as their own connected sub-graph (DISC_R*_IN/_OUT); nothing wires
+# the origin node to the pre-existing nodes automatically. Every node drop
+# hot-reloads the live map via switch_topological_map with no_alias=True,
+# which REPLACES whatever topo map Nav2/topological_navigation currently
+# has loaded — don't run discovery concurrently with active navigation on
+# the same map for this reason.
+#
+# An origin node (row_role='entry', same schema as every other node) is
+# dropped at the robot's actual pose the instant start_discovery is called
+# — before any motion — so the very first row has a recorded start point
+# the same way every subsequent row does.
+#
 # Requires (same as limbic_row_follow_node.py):
 #   /row_follow/enable        (std_srvs/SetBool)   — Neo's crop_row_node
 #   /aoc/heartbeat/neo_vision (std_msgs/Bool)       — Neo perception health
@@ -31,30 +47,52 @@
 # Also requires (matches ui_node.py's WriteTopologicalMap usage):
 #   /topological_map_manager2/switch_topological_map (topological_navigation_msgs/srv/WriteTopologicalMap)
 #
-# Headland maneuver (the "50cm + 180 degree" the operator asked for) is
-# implemented as three open-loop TF-monitored segments, alternating turn
-# direction each time so consecutive rows are traversed in opposite
+# Headland maneuver is five open-loop TF-monitored segments, alternating
+# turn direction each time so consecutive rows are traversed in opposite
 # directions (classic boustrophedon / Ω-turn), and IS NOT itself driven by
 # vision — Neo is disabled throughout (mirrors the Phase 0 align pattern in
 # limbic_row_follow_node.py, which is also the only other place in the
 # stack that drives /cmd_vel directly while Neo is disabled):
-#   1. turn in place ~90 deg (direction alternates each maneuver)
-#   2. drive forward `lateral_step_m` (this is what actually produces the
-#      sideways offset onto the next row — turning first then driving
-#      straight is how a non-holonomic diff-drive base achieves a lateral
-#      shift)
-#   3. turn in place ~90 deg the SAME direction (net 180 deg from the
-#      original heading — now facing back down the field into the new row)
-#   4. creep forward at `creep_linear_vel`, still with Neo disabled but
-#      still watching /aoc/heartbeat/neo_vision (crop_row_node computes
-#      detections/heartbeat independent of the enable flag — only cmd_vel
-#      publishing is gated), until the heartbeat is alive continuously for
-#      `row_reacquire_confirm_s`. That confirms a row, not a single noisy
-#      frame, is what's in view before handing back control.
+#   1. HEADLAND_CLEARANCE: drive straight forward `headland_clearance_m`
+#      (default 0.5m) — clears the implement/tracks past the row-end
+#      canopy edge before pivoting, so the turn doesn't cut through
+#      standing crop right at the row end.
+#   2. TURN_1: turn in place ~90 deg (direction alternates each maneuver)
+#   3. LATERAL_STEP: drive forward `lateral_step_m` (default 1.0m) — this
+#      is what actually produces the sideways offset onto the next row,
+#      i.e. the "1m along the headland" travel.
+#   4. TURN_2: turn in place ~90 deg the SAME direction (net 180 deg from
+#      the original heading — now facing back down the field into the
+#      new row).
+#   5. SEEK_ROW: creep forward at `creep_linear_vel`, still with Neo
+#      disabled but still watching /aoc/heartbeat/neo_vision (crop_row_node
+#      computes detections/heartbeat independent of the enable flag — only
+#      cmd_vel publishing is gated), until the heartbeat is alive
+#      continuously for `row_reacquire_confirm_s`. That confirms a row,
+#      not a single noisy frame, is what's in view before handing back
+#      control.
 #
-# If step 4 doesn't reacquire a row within `max_search_distance_m`, this
-# is treated as having discovered the end of the field (not just a bad
-# frame) and discovery stops cleanly with the map so far intact.
+# If SEEK_ROW's straight creep doesn't reacquire within
+# `max_search_distance_m`, that's NOT immediately treated as the field
+# boundary — the turn onto the new row may just be a bit misaligned. It
+# falls through to:
+#   6. WIGGLE_SEEK: an expanding fan scan, alternating single-track nudges
+#      (left track forward ~`wiggle_step_m` [default 0.10m], then right
+#      track forward the same, growing further out each cycle) up to
+#      ±`wiggle_max_sweep_deg` (default 90 deg) either side of the heading
+#      TURN_2 left it facing, checking for reacquisition after every single
+#      nudge. Each nudge is real diff-drive kinematics for a single track
+#      moving and the other stationary (v=v_side/2, w=∓v_side/track_sep),
+#      closed-loop against actual TF yaw rather than open-loop timing.
+#      `track_separation_m` (default 0.698m) matches devkit_simulation's
+#      default sim model (sowbot_01.xacro) — override it if driving a
+#      different chassis (e.g. robo_caatinga.urdf.xacro is 1.85m), or the
+#      wiggle angles will be wrong for that vehicle.
+#
+# Only if the wiggle scan ALSO exhausts its full ±90 deg sweep without
+# reacquiring is this treated as having discovered the end of the field
+# (not just a bad frame or a misaligned turn), and discovery stops cleanly
+# with the map so far intact.
 #
 # Row-end detection during FOLLOW_ROW is the mirror image: a heartbeat that
 # goes (and stays) false for `row_lost_confirm_s` is treated as reaching
@@ -97,10 +135,12 @@ _NAV_ACTION = 'navigate_to_pose'
 class _State(Enum):
     IDLE = auto()
     FOLLOW_ROW = auto()
+    HEADLAND_CLEARANCE = auto()  # straight creep clear of row-end canopy
     TURN_1 = auto()          # first 90 deg turn
     LATERAL_STEP = auto()    # drive forward lateral_step_m
     TURN_2 = auto()          # second 90 deg turn (net 180 deg)
     SEEK_ROW = auto()        # creep forward until heartbeat reacquired
+    WIGGLE_SEEK = auto()     # fan-scan fallback if straight seek fails
     COMPLETE = auto()
     FAULT = auto()
 
@@ -117,19 +157,25 @@ class RowDiscoveryNode(Node):
         # ------------------------------------------------------------------
         # Parameters
         # ------------------------------------------------------------------
-        self.declare_parameter('lateral_step_m', 0.5)
+        self.declare_parameter('headland_clearance_m', 0.5)
+        self.declare_parameter('lateral_step_m', 1.0)
         self.declare_parameter('turn_speed_rad_s', 0.3)
         self.declare_parameter('creep_linear_vel', 0.12)
         self.declare_parameter('row_lost_confirm_s', 1.5)
         self.declare_parameter('row_reacquire_confirm_s', 0.75)
         self.declare_parameter('max_search_distance_m', 4.0)
+        self.declare_parameter('wiggle_step_m', 0.10)
+        self.declare_parameter('wiggle_speed_mps', 0.15)
+        self.declare_parameter('wiggle_max_sweep_deg', 90.0)
+        self.declare_parameter('track_separation_m', 0.698)  # sowbot_01.xacro
         self.declare_parameter('enable_service_timeout_s', 2.0)
         self.declare_parameter('monitor_rate_hz', 10.0)
         self.declare_parameter('first_turn_direction', 'right')  # 'right'|'left'
-        self.declare_parameter('map_name', 'discovered_map')
+        self.declare_parameter('map_name', 'maize_map')
         self.declare_parameter('maps_dir', '/workspace/maps')
         self.declare_parameter('node_name_prefix', 'DISC_R')
 
+        self._headland_clearance: float = self.get_parameter('headland_clearance_m').value
         self._lateral_step: float = self.get_parameter('lateral_step_m').value
         self._turn_speed: float = self.get_parameter('turn_speed_rad_s').value
         self._creep_vel: float = self.get_parameter('creep_linear_vel').value
@@ -137,6 +183,11 @@ class RowDiscoveryNode(Node):
         self._row_reacquire_confirm_s: float = self.get_parameter(
             'row_reacquire_confirm_s').value
         self._max_search_m: float = self.get_parameter('max_search_distance_m').value
+        self._wiggle_step_m: float = self.get_parameter('wiggle_step_m').value
+        self._wiggle_speed_mps: float = self.get_parameter('wiggle_speed_mps').value
+        self._wiggle_max_sweep_rad: float = math.radians(
+            self.get_parameter('wiggle_max_sweep_deg').value)
+        self._track_sep: float = self.get_parameter('track_separation_m').value
         self._enable_timeout: float = self.get_parameter('enable_service_timeout_s').value
         self._map_name: str = self.get_parameter('map_name').value
         self._maps_dir: str = self.get_parameter('maps_dir').value
@@ -170,6 +221,10 @@ class RowDiscoveryNode(Node):
         self._maneuver_start_pose: tuple | None = None   # (x, y, yaw)
         self._maneuver_target_yaw: float | None = None
         self._seek_start_pose: tuple | None = None
+        self._wiggle_targets: list[float] = []   # queued yaw offsets, rad
+        self._wiggle_ref_yaw: float | None = None
+        self._wiggle_target_yaw: float | None = None
+        self._wiggle_side: str | None = None     # 'left' | 'right' track fwd
         self._row_index: int = 1
         self._last_node_name: str | None = None
         self._topo_doc: dict = {}
@@ -241,6 +296,7 @@ class RowDiscoveryNode(Node):
         self._last_node_name = None
         self._turn_right = (
             self.get_parameter('first_turn_direction').value.lower() != 'left')
+        self._drop_origin_node()
         self._enter_follow_row()
         response.success = True
         response.message = 'discovery started'
@@ -329,6 +385,19 @@ class RowDiscoveryNode(Node):
         self._state = _State.FOLLOW_ROW
         self._set_status('following row')
 
+    def _enter_headland_clearance(self) -> None:
+        self._safe_disable()
+        self._publish_zero_twist()
+        pose = self._pose()
+        if pose is None:
+            self._set_status('no TF at row end — fault')
+            self._state = _State.FAULT
+            return
+        self._maneuver_start_pose = pose
+        self._state = _State.HEADLAND_CLEARANCE
+        self._set_status(
+            f'headland clearance {self._headland_clearance:.2f}m straight')
+
     def _enter_turn_1(self) -> None:
         self._safe_disable()
         self._publish_zero_twist()
@@ -372,6 +441,57 @@ class RowDiscoveryNode(Node):
         self._state = _State.SEEK_ROW
         self._set_status('creeping forward, seeking next row')
 
+    def _enter_wiggle_seek(self) -> None:
+        pose = self._pose()
+        if pose is None:
+            self._state = _State.FAULT
+            return
+        self._publish_zero_twist()
+        _x, _y, yaw = pose
+        self._wiggle_ref_yaw = yaw
+        # Fan-scan schedule: alternating -delta,+delta,-2*delta,+2*delta,...
+        # 'left wheels forward' first (negative offset == turn right, see
+        # _tick_wiggle_seek), then 'right wheels forward' (positive
+        # offset), each cycle stepping wiggle_step_m further out, capped at
+        # +/- wiggle_max_sweep_deg either side.
+        delta = self._wiggle_step_m / self._track_sep
+        targets: list[float] = []
+        n = 1
+        while n * delta <= self._wiggle_max_sweep_rad + 1e-6:
+            targets.append(-n * delta)
+            targets.append(n * delta)
+            n += 1
+        self._wiggle_targets = targets
+        self._state = _State.WIGGLE_SEEK
+        self._set_status(
+            f'straight seek failed — wiggle scan up to '
+            f'+/-{math.degrees(self._wiggle_max_sweep_rad):.0f} deg')
+        self._advance_wiggle_target()
+
+    def _advance_wiggle_target(self) -> None:
+        if not self._wiggle_targets:
+            # Full fan sweep exhausted on both sides without reacquiring —
+            # NOW treat this as the field boundary, not before.
+            self._publish_zero_twist()
+            self._safe_disable()
+            self._state = _State.COMPLETE
+            self._set_status(
+                f'no row found within +/-'
+                f'{math.degrees(self._wiggle_max_sweep_rad):.0f} deg wiggle '
+                'scan — assuming field boundary reached; discovery complete')
+            self._write_map(final=True)
+            return
+        offset = self._wiggle_targets.pop(0)
+        self._wiggle_target_yaw = _wrap_pi(self._wiggle_ref_yaw + offset)
+        self._wiggle_side = 'left' if offset < 0 else 'right'
+
+    def _on_row_reacquired(self) -> None:
+        self._publish_zero_twist()
+        self._turn_right = not self._turn_right   # alternate next time
+        self._row_index += 1
+        self._drop_row_start_node()
+        self._enter_follow_row()
+
     # ------------------------------------------------------------------
     # Main tick — drives the whole state machine at monitor_rate_hz.
     # ------------------------------------------------------------------
@@ -382,6 +502,8 @@ class RowDiscoveryNode(Node):
 
         if self._state == _State.FOLLOW_ROW:
             self._tick_follow_row()
+        elif self._state == _State.HEADLAND_CLEARANCE:
+            self._tick_headland_clearance()
         elif self._state == _State.TURN_1:
             self._tick_turn(next_state=self._enter_lateral_step)
         elif self._state == _State.LATERAL_STEP:
@@ -390,6 +512,8 @@ class RowDiscoveryNode(Node):
             self._tick_turn(next_state=self._enter_seek_row)
         elif self._state == _State.SEEK_ROW:
             self._tick_seek_row()
+        elif self._state == _State.WIGGLE_SEEK:
+            self._tick_wiggle_seek()
         # COMPLETE / FAULT: idle, nothing to drive.
 
     def _tick_follow_row(self) -> None:
@@ -399,7 +523,23 @@ class RowDiscoveryNode(Node):
             # Debounced: heartbeat has been false continuously for the
             # confirm window, not just one bad frame — treat as row end.
             self._drop_row_end_node()
+            self._enter_headland_clearance()
+
+    def _tick_headland_clearance(self) -> None:
+        pose = self._pose()
+        if pose is None:
+            self._publish_zero_twist()
+            return
+        x, y, _yaw = pose
+        sx, sy, _ = self._maneuver_start_pose
+        travelled = math.hypot(x - sx, y - sy)
+        if travelled >= self._headland_clearance:
+            self._publish_zero_twist()
             self._enter_turn_1()
+            return
+        t = Twist()
+        t.linear.x = self._creep_vel
+        self._cmd_vel_pub.publish(t)
 
     def _tick_turn(self, next_state) -> None:
         pose = self._pose()
@@ -443,25 +583,45 @@ class RowDiscoveryNode(Node):
 
         if (self._heartbeat_alive
                 and self._heartbeat_state_duration() >= self._row_reacquire_confirm_s):
-            self._publish_zero_twist()
-            self._turn_right = not self._turn_right   # alternate next time
-            self._row_index += 1
-            self._drop_row_start_node()
-            self._enter_follow_row()
+            self._on_row_reacquired()
             return
 
         if travelled >= self._max_search_m:
-            self._publish_zero_twist()
-            self._safe_disable()
-            self._state = _State.COMPLETE
-            self._set_status(
-                f'no row found within {self._max_search_m:.1f}m — '
-                'assuming field boundary reached; discovery complete')
-            self._write_map(final=True)
+            # Straight creep alone didn't find it — try the fan-scan wiggle
+            # before giving up (this used to go straight to COMPLETE).
+            self._enter_wiggle_seek()
             return
 
         t = Twist()
         t.linear.x = self._creep_vel
+        self._cmd_vel_pub.publish(t)
+
+    def _tick_wiggle_seek(self) -> None:
+        if (self._heartbeat_alive
+                and self._heartbeat_state_duration() >= self._row_reacquire_confirm_s):
+            self._on_row_reacquired()
+            return
+
+        pose = self._pose()
+        if pose is None:
+            self._publish_zero_twist()
+            return
+        _x, _y, yaw = pose
+        err = _wrap_pi(self._wiggle_target_yaw - yaw)
+        if abs(err) <= math.radians(2.0):
+            self._publish_zero_twist()
+            self._advance_wiggle_target()
+            return
+
+        # Single-track-forward kinematics (the other track stationary):
+        # v = v_side / 2, w = ∓v_side / track_sep. 'left' track forward
+        # pivots right (negative angular.z); 'right' track forward pivots
+        # left (positive angular.z) — matches the sign convention used to
+        # build the target schedule in _enter_wiggle_seek.
+        t = Twist()
+        t.linear.x = self._wiggle_speed_mps / 2.0
+        w = self._wiggle_speed_mps / self._track_sep
+        t.angular.z = -w if self._wiggle_side == 'left' else w
         self._cmd_vel_pub.publish(t)
 
     # ------------------------------------------------------------------
@@ -473,6 +633,17 @@ class RowDiscoveryNode(Node):
     # ('navigate_to_pose') since that's a short, unremarkable point-to-
     # point hop through open headland, same as existing headland edges.
     # ------------------------------------------------------------------
+
+    def _drop_origin_node(self) -> None:
+        # Dropped once, at start_discovery, at the robot's actual pose
+        # before any motion. connect_to is None here (it's the first node
+        # ever dropped this run) so no edge is created yet — the edge FROM
+        # this node onward is added automatically when _drop_row_end_node
+        # for row 1 is later dropped (edge_action=_ROW_ACTION), same as
+        # every other row-to-row link.
+        name = f'{self._name_prefix}{self._row_index}_IN'
+        self._drop_node(name, row_id=self._row_index, row_role='entry',
+                         edge_action=_ROW_ACTION)
 
     def _drop_row_end_node(self) -> None:
         name = f'{self._name_prefix}{self._row_index}_OUT'
