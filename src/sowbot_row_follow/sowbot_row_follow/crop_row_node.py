@@ -170,7 +170,8 @@ def visual_servoing_ctl(camera: Camera,
 # ===========================================================================
 # Índice de vegetação ExG + extração de contornos  (de / from imageProc.py — BSD-2)
 # ===========================================================================
-def compute_exg_mask(bgr_img: np.ndarray, close_kernel: int = 21):
+def compute_exg_mask(bgr_img: np.ndarray, close_kernel: int = 21,
+                      min_threshold: float = 15.0):
     """ExG + Otsu vegetation mask.
 
     close_kernel (engineering addition, NOT in the original imageProc.py):
@@ -201,6 +202,32 @@ def compute_exg_mask(bgr_img: np.ndarray, close_kernel: int = 21):
     in-row lettuce spacing at this camera's working distance. Re-validate
     against your own field footage if camera height/FOV changes
     significantly. Set to 0 to disable and get the original dilate-only mask.
+
+    min_threshold (engineering addition, NOT in the original imageProc.py):
+    Otsu's method finds the ExG cut that best splits THIS FRAME's histogram
+    into two classes — it is global and per-frame adaptive, with no
+    awareness of what "real vegetation" looks like in absolute terms. On a
+    low-vegetation frame (end-of-row: mostly bare soil, little/no real
+    canopy) there's no strong green mass to anchor the split, so Otsu can
+    settle on a low threshold and classify weak background noise — soil
+    colour variation, shadow, render/compression artefacts — as
+    "vegetation" simply because it's marginally greener than the rest of an
+    already-green-starved frame. This is most dangerous exactly at row-end,
+    when correctly reporting "no vegetation" matters most.
+    min_threshold floors Otsu's choice: if the frame doesn't have enough
+    real green content to justify a cut at or above this value, fall back
+    to a fixed threshold instead of an increasingly permissive adaptive one.
+
+    15.0 is an UNVALIDATED PLACEHOLDER, not a calibrated value — same
+    situation as tsm_line_min_sum before you had real numbers for it. The
+    caller (crop_row_node) logs the raw Otsu-chosen threshold (throttled,
+    INFO) every frame specifically so you can read real "row present" vs
+    "row absent/end-of-row artefact" numbers off the console and set this
+    from that, rather than a guess. Set to 0 to disable and get the
+    original unfloored Otsu behaviour.
+
+    Returns (mask, otsu_threshold) — otsu_threshold is Otsu's own choice
+    BEFORE any floor was applied, for that calibration logging.
     """
     img = bgr_img.astype("int32")
     b, g, r = img[:, :, 0], img[:, :, 1], img[:, :, 2]
@@ -208,13 +235,15 @@ def compute_exg_mask(bgr_img: np.ndarray, close_kernel: int = 21):
     exg[exg < 0] = 0
     exg = exg.astype("uint8")
     blur = cv.GaussianBlur(exg, (5, 5), 0)
-    _, mask = cv.threshold(blur, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+    otsu_t, mask = cv.threshold(blur, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+    if min_threshold > 0 and otsu_t < min_threshold:
+        _, mask = cv.threshold(blur, min_threshold, 255, cv.THRESH_BINARY)
     kernel = np.ones((10, 10), np.uint8)
     mask = cv.dilate(mask, kernel, iterations=1)
     if close_kernel and close_kernel > 0:
         ck = np.ones((close_kernel, close_kernel), np.uint8)
         mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, ck)
-    return mask
+    return mask, float(otsu_t)
 
 
 def get_plant_centers(mask: np.ndarray, min_area: float,
@@ -356,6 +385,8 @@ class CropRowNode(Node):
         self.declare_parameter("window_width", 80)
         self.declare_parameter("min_contour_area", 10.0)
         self.declare_parameter("plant_close_kernel", 21)
+        self.declare_parameter("exg_min_threshold", 15.0)
+        self.declare_parameter("mask_bottom_crop_px", 0)
         self.declare_parameter("plant_detect_neighborhood_px", 30)
         self.declare_parameter("plant_detect_min_dist_px", 10.0)
         self.declare_parameter("camera_height_m", 1.055)   # ifarmate cam_mount_z
@@ -419,6 +450,8 @@ class CropRowNode(Node):
         self.win_w: int          = p("window_width").value
         self.min_area: float     = p("min_contour_area").value
         self.plant_close_kernel: int = p("plant_close_kernel").value
+        self.exg_min_threshold: float = p("exg_min_threshold").value
+        self.mask_bottom_crop_px: int = int(p("mask_bottom_crop_px").value)
         self.plant_neighborhood_px: int   = int(p("plant_detect_neighborhood_px").value)
         self.plant_min_dist_px: float     = float(p("plant_detect_min_dist_px").value)
         self.linear_vel: float   = p("linear_vel").value
@@ -642,7 +675,37 @@ class CropRowNode(Node):
         if w != self.img_w or h != self.img_h:
             bgr = cv.resize(bgr, (self.img_w, self.img_h))
 
-        mask = compute_exg_mask(bgr, close_kernel=self.plant_close_kernel)
+        mask, otsu_t = compute_exg_mask(bgr, close_kernel=self.plant_close_kernel,
+                                         min_threshold=self.exg_min_threshold)
+        self.get_logger().info(
+            "ExG otsu_threshold=%.1f (floor=%.1f)" % (otsu_t, self.exg_min_threshold),
+            throttle_duration_sec=1.0)
+
+        if self.mask_bottom_crop_px > 0:
+            # The bottom self.mask_bottom_crop_px rows are consistently
+            # classified as "vegetation" every frame regardless of whether a
+            # real row is present or not (confirmed from debug_image: dense,
+            # evenly-spaced plant-center markers spanning nearly the full
+            # width at the bottom edge, in frames where the row detector was
+            # otherwise working correctly). That regular spacing is the
+            # signature of ONE solid, connected blob (a distanceTransform
+            # medial-axis ridge with peaks spaced by plant_detect_min_dist_px)
+            # — not scattered noise — meaning the camera consistently sees
+            # something non-row-informative at the very near field: most
+            # likely the robot's own hood/chassis at this
+            # camera_height_m/camera_tilt_deg, or ground too close/foreshortened
+            # for ExG to reliably tell apart from soil. Rather than trying to
+            # make the classifier smarter about a region that structurally
+            # can't be trusted, exclude it before detection runs at all — both
+            # for the TSM anchor/line search AND the displayed plant centers.
+            crop_frac_flagged = float(
+                (mask[-self.mask_bottom_crop_px:, :] > 0).mean())
+            self.get_logger().info(
+                "mask_bottom_crop_px=%d flagged_fraction=%.2f (before crop)"
+                % (self.mask_bottom_crop_px, crop_frac_flagged),
+                throttle_duration_sec=2.0)
+            mask[-self.mask_bottom_crop_px:, :] = 0
+
         centers = get_plant_centers(mask, self.min_area,
                                           neighborhood_px=self.plant_neighborhood_px,
                                           min_dist_px=self.plant_min_dist_px)
