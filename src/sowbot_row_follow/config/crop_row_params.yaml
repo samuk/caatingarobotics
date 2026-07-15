@@ -43,6 +43,47 @@ crop_row_node:
     min_contour_area: 40.0
     plant_close_kernel: 21
 
+    # NEW — Otsu (cv.THRESH_OTSU in compute_exg_mask) is a global,
+    # per-frame-adaptive threshold: it has no notion of what "real
+    # vegetation" looks like in absolute ExG terms, only what best splits
+    # THIS frame's histogram. On a low-vegetation frame (end-of-row: mostly
+    # bare soil) there's not enough real green mass to anchor a sensible
+    # split, so Otsu can pick a low threshold and sweep background noise —
+    # soil colour variation, shadow, render artefacts — into the
+    # "vegetation" class. Symptom: the TSM row line correctly drops at
+    # row-end, then reappears locked onto a background artefact once
+    # nothing else competes for the (degenerate) threshold.
+    #
+    # 15.0 here is an UNVALIDATED PLACEHOLDER, not a calibrated value —
+    # same situation tsm_line_min_sum was in before real numbers existed.
+    # crop_row_node now logs "ExG otsu_threshold=..." (throttled, INFO)
+    # every frame. Drive over a real row vs. a real row-end/artefact frame,
+    # read the actual otsu_threshold numbers off the console for each, and
+    # set exg_min_threshold from that — not from this guess.
+    # 25.0 — STARTING POINT, NOT A VERIFIED VALUE. Confirmed behaviour:
+    # the purple bar only appears on empty (no-crop-in-frame) frames, and
+    # is absent when a real row is in frame. That matches Otsu having
+    # nothing to anchor to on an empty frame and drifting to a low
+    # threshold that admits soil noise; with a real row present there's
+    # enough green mass to pick a much higher, correct threshold.
+    #
+    # 25 is set above the ~21 an empty/artifact frame produced in a
+    # synthetic repro of this failure mode — NOT your actual sim numbers.
+    # Watch the "ExG otsu_threshold=..." log (throttled, INFO):
+    #   - on an empty frame: should now read exactly 25.0 (floored) and
+    #     the purple bar should be gone from debug_image.
+    #   - on a real-row frame: should read well above 25 on its own,
+    #     unaffected by the floor — if it's reading close to 25, raise
+    #     this value, it means real rows aren't leaving much margin.
+    # Adjust from those two real numbers, not from this comment.
+    exg_min_threshold: 25.0
+
+    # Bottom-crop is NOT the fix here — that was for a different,
+    # structural (always-present) near-field artifact theory, ruled out:
+    # the purple bar is content-dependent (empty frames only), not
+    # present in every frame. Leave at 0.
+    mask_bottom_crop_px: 0
+
     plant_detect_neighborhood_px: 18
     plant_detect_min_dist_px: 6.0
 
