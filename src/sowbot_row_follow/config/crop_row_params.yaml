@@ -78,11 +78,12 @@ crop_row_node:
     # Adjust from those two real numbers, not from this comment.
     exg_min_threshold: 25.0
 
-    # Bottom-crop is NOT the fix here — that was for a different,
-    # structural (always-present) near-field artifact theory, ruled out:
-    # the purple bar is content-dependent (empty frames only), not
-    # present in every frame. Leave at 0.
-    mask_bottom_crop_px: 0
+    # Root cause not pinned down (seen both in empty frames and with a real
+    # row in frame) — pragmatic call: just exclude it rather than keep
+    # chasing the classifier. Blanks the bottom N px of the mask before
+    # both plant-center display AND TSM detection. Raise if 20px doesn't
+    # fully clear it in your debug_image.
+    mask_bottom_crop_px: 20
 
     plant_detect_neighborhood_px: 18
     plant_detect_min_dist_px: 6.0
